@@ -1,0 +1,14 @@
+# Dependências locais e temporários
+node_modules/
+.local_node/
+.DS_Store
+
+# Backend - uploads e saídas processadas
+backend/uploads/*
+!backend/uploads/.gitkeep
+backend/outputs/*
+!backend/outputs/.gitkeep
+
+# Frontend - pasta de build
+frontend/dist/
+frontend/node_modules/
