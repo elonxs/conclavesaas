@@ -12,3 +12,7 @@ backend/outputs/*
 # Frontend - pasta de build
 frontend/dist/
 frontend/node_modules/
+
+# Configurações locais sensíveis
+.env
+backend/.env

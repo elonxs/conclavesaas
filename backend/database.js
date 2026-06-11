@@ -1,36 +1,31 @@
-import fs from 'fs';
-import path from 'path';
+import pg from 'pg';
 import crypto from 'crypto';
-import { fileURLToPath } from 'url';
+import dotenv from 'dotenv';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const DB_PATH = path.join(__dirname, 'db.json');
+dotenv.config();
 
-// Garantir que o arquivo de banco existe
-if (!fs.existsSync(DB_PATH)) {
-  fs.writeFileSync(DB_PATH, JSON.stringify({ users: [], sessions: {}, history: [] }, null, 2));
-}
+const { Pool } = pg;
 
-export function readDb() {
-  try {
-    const data = fs.readFileSync(DB_PATH, 'utf-8');
-    return JSON.parse(data);
-  } catch (e) {
-    console.error('Erro ao ler banco de dados JSON:', e);
-    return { users: [], sessions: {}, history: [] };
+// Inicializa o Pool de Conexões do PostgreSQL
+const connectionString = process.env.DATABASE_URL;
+
+const pool = new Pool({
+  connectionString,
+  ssl: connectionString && connectionString.includes('supabase.co') 
+    ? { rejectUnauthorized: false } 
+    : false // Habilita SSL apenas se for conexão Supabase em produção
+});
+
+// Testar conexão inicial
+pool.query('SELECT NOW()', (err, res) => {
+  if (err) {
+    console.error('[Database] Erro ao conectar com o PostgreSQL:', err.message);
+  } else {
+    console.log('[Database] Conexão com o PostgreSQL (Supabase) estabelecida com sucesso.');
   }
-}
+});
 
-export function writeDb(data) {
-  try {
-    fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2), 'utf-8');
-  } catch (e) {
-    console.error('Erro ao escrever no banco de dados JSON:', e);
-  }
-}
-
-// Criptografia de senhas
+// Criptografia de senhas (permanece síncrona/segura)
 export function hashPassword(password, salt) {
   return crypto.pbkdf2Sync(password, salt, 1000, 64, 'sha512').toString('hex');
 }
@@ -40,25 +35,22 @@ export function generateSalt() {
 }
 
 // Criar Usuário
-export function createUser(email, password, name) {
-  const db = readDb();
-  
-  // Verificar se o e-mail já existe
+export async function createUser(email, password, name) {
   const normalizedEmail = email.toLowerCase().trim();
-  if (db.users.find(u => u.email === normalizedEmail)) {
-    throw new Error('Este e-mail já está cadastrado.');
-  }
+  
+  // Verificar se é o primeiro usuário no banco
+  const countRes = await pool.query('SELECT COUNT(*) FROM users');
+  const isFirstUser = parseInt(countRes.rows[0].count, 10) === 0;
 
   const salt = generateSalt();
   const passwordHash = hashPassword(password, salt);
-  
+
   // Pegar iniciais do nome
   const nameParts = name.trim().split(' ');
   const avatarInitials = nameParts.length > 1 
     ? (nameParts[0][0] + nameParts[nameParts.length - 1][0]).toUpperCase()
     : nameParts[0].slice(0, 2).toUpperCase();
 
-  // Sortear um gradiente de avatar
   const gradients = [
     'linear-gradient(135deg, #F59E0B, #06B6D4)',
     'linear-gradient(135deg, #10B981, #06B6D4)',
@@ -67,228 +59,319 @@ export function createUser(email, password, name) {
   ];
   const avatarColor = gradients[Math.floor(Math.random() * gradients.length)];
 
-  const isFirstUser = db.users.length === 0;
-  const newUser = {
-    id: crypto.randomUUID(),
-    email: normalizedEmail,
-    name: name.trim(),
-    passwordHash,
-    salt,
-    plan: 'Free',
-    role: isFirstUser ? 'admin' : 'user',
-    status: 'active',
-    avatarInitials,
-    avatarColor,
-    createdAt: new Date().toISOString()
-  };
+  const userId = crypto.randomUUID();
+  const role = isFirstUser ? 'admin' : 'user';
+  const status = 'active';
 
-  db.users.push(newUser);
-  writeDb(db);
+  const queryText = `
+    INSERT INTO users (id, email, name, password_hash, salt, plan, role, status, avatar_initials, avatar_color, created_at)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+    RETURNING id, email, name, plan, role, status, avatar_initials AS "avatarInitials", avatar_color AS "avatarColor", created_at AS "createdAt"
+  `;
 
-  // Retornar usuário sem hash e salt por segurança
-  const { passwordHash: _, salt: __, ...userResponse } = newUser;
-  return userResponse;
+  try {
+    const res = await pool.query(queryText, [
+      userId,
+      normalizedEmail,
+      name.trim(),
+      passwordHash,
+      salt,
+      'Free',
+      role,
+      status,
+      avatarInitials,
+      avatarColor
+    ]);
+    return res.rows[0];
+  } catch (err) {
+    if (err.code === '23505') { // Unique constraint violation no Postgres
+      throw new Error('Este e-mail já está cadastrado.');
+    }
+    throw err;
+  }
 }
 
-// Autenticar Usuário
-export function validateUser(email, password) {
-  const db = readDb();
+// Validar Usuário (Login)
+export async function validateUser(email, password) {
   const normalizedEmail = email.toLowerCase().trim();
-  const user = db.users.find(u => u.email === normalizedEmail);
-  
-  if (!user) return null;
+  const res = await pool.query('SELECT * FROM users WHERE email = $1', [normalizedEmail]);
+  if (res.rows.length === 0) return null;
 
+  const user = res.rows[0];
   const checkHash = hashPassword(password, user.salt);
-  if (checkHash === user.passwordHash) {
-    const { passwordHash: _, salt: __, ...userResponse } = user;
-    return userResponse;
+  if (checkHash === user.password_hash) {
+    return {
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      plan: user.plan,
+      role: user.role,
+      status: user.status,
+      avatarInitials: user.avatar_initials,
+      avatarColor: user.avatar_color,
+      createdAt: user.created_at
+    };
   }
   return null;
 }
 
-// Gerenciar Sessões
-export function createSession(userId) {
-  const db = readDb();
+// Criar Sessão
+export async function createSession(userId) {
   const token = crypto.randomBytes(32).toString('hex');
-  
-  db.sessions[token] = {
-    userId,
-    createdAt: new Date().toISOString()
-  };
-  writeDb(db);
+  await pool.query('INSERT INTO sessions (token, user_id, created_at) VALUES ($1, $2, NOW())', [token, userId]);
   return token;
 }
 
-export function destroySession(token) {
-  const db = readDb();
-  if (db.sessions[token]) {
-    delete db.sessions[token];
-    writeDb(db);
-    return true;
-  }
-  return false;
+// Destruir Sessão
+export async function destroySession(token) {
+  const res = await pool.query('DELETE FROM sessions WHERE token = $1', [token]);
+  return res.rowCount > 0;
 }
 
-export function getUserBySession(token) {
-  const db = readDb();
-  const session = db.sessions[token];
-  if (!session) return null;
+// Obter Usuário pela Sessão
+export async function getUserBySession(token) {
+  const queryText = `
+    SELECT u.* 
+    FROM sessions s
+    JOIN users u ON s.user_id = u.id
+    WHERE s.token = $1
+  `;
+  const res = await pool.query(queryText, [token]);
+  if (res.rows.length === 0) return null;
 
-  // Opcional: verificar expiração da sessão (ex: 7 dias)
-  const user = db.users.find(u => u.id === session.userId);
-  if (!user) return null;
-
-  const { passwordHash: _, salt: __, ...userResponse } = user;
-  return userResponse;
-}
-
-// Atualizar informações do usuário
-export function updateUserProfile(userId, data) {
-  const db = readDb();
-  const index = db.users.findIndex(u => u.id === userId);
-  if (index === -1) return null;
-
-  db.users[index] = {
-    ...db.users[index],
-    name: data.name || db.users[index].name,
-    email: (data.email || db.users[index].email).toLowerCase().trim(),
-    avatarInitials: data.avatarInitials || db.users[index].avatarInitials,
-    avatarColor: data.avatarColor || db.users[index].avatarColor
+  const user = res.rows[0];
+  return {
+    id: user.id,
+    email: user.email,
+    name: user.name,
+    plan: user.plan,
+    role: user.role,
+    status: user.status,
+    avatarInitials: user.avatar_initials,
+    avatarColor: user.avatar_color,
+    createdAt: user.created_at
   };
+}
 
-  writeDb(db);
-  const { passwordHash: _, salt: __, ...userResponse } = db.users[index];
-  return userResponse;
+// Atualizar Perfil do Usuário
+export async function updateUserProfile(userId, data) {
+  const queryText = `
+    UPDATE users
+    SET name = COALESCE($1, name),
+        email = COALESCE($2, email),
+        avatar_initials = COALESCE($3, avatar_initials),
+        avatar_color = COALESCE($4, avatar_color)
+    WHERE id = $5
+    RETURNING id, email, name, plan, role, status, avatar_initials AS "avatarInitials", avatar_color AS "avatarColor"
+  `;
+  try {
+    const res = await pool.query(queryText, [
+      data.name || null,
+      data.email ? data.email.toLowerCase().trim() : null,
+      data.avatarInitials || null,
+      data.avatarColor || null,
+      userId
+    ]);
+    return res.rows[0];
+  } catch (err) {
+    if (err.code === '23505') {
+      throw new Error('Este e-mail já está em uso.');
+    }
+    throw err;
+  }
 }
 
 // Alterar Plano
-export function upgradeUserPlan(userId, plan) {
-  const db = readDb();
-  const index = db.users.findIndex(u => u.id === userId);
-  if (index === -1) return null;
-
-  db.users[index].plan = plan;
-  writeDb(db);
-  const { passwordHash: _, salt: __, ...userResponse } = db.users[index];
-  return userResponse;
+export async function upgradeUserPlan(userId, plan) {
+  const queryText = `
+    UPDATE users
+    SET plan = $1
+    WHERE id = $2
+    RETURNING id, email, name, plan, role, status, avatar_initials AS "avatarInitials", avatar_color AS "avatarColor"
+  `;
+  const res = await pool.query(queryText, [plan, userId]);
+  return res.rows[0];
 }
 
-// Adicionar ao Histórico
-export function addHistory(userId, originalName, size, preset, duration) {
-  const db = readDb();
-  const entry = {
-    id: crypto.randomUUID(),
-    userId,
-    originalName,
-    size,
-    preset,
-    duration,
-    createdAt: new Date().toISOString()
-  };
-  db.history.push(entry);
-  writeDb(db);
-  return entry;
+// Adicionar Entrada no Histórico
+export async function addHistory(userId, originalName, size, preset, duration) {
+  const id = crypto.randomUUID();
+  const queryText = `
+    INSERT INTO history (id, user_id, original_name, size, preset, duration, created_at)
+    VALUES ($1, $2, $3, $4, $5, $6, NOW())
+    RETURNING id, user_id AS "userId", original_name AS "originalName", size, preset, duration, created_at AS "createdAt"
+  `;
+  const res = await pool.query(queryText, [id, userId, originalName, size, preset, duration]);
+  return res.rows[0];
 }
 
 // Obter Histórico do Usuário
-export function getUserHistory(userId) {
-  const db = readDb();
-  return db.history
-    .filter(h => h.userId === userId)
-    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+export async function getUserHistory(userId) {
+  const queryText = `
+    SELECT id, user_id AS "userId", original_name AS "originalName", size, preset, duration, created_at AS "createdAt"
+    FROM history
+    WHERE user_id = $1
+    ORDER BY created_at DESC
+  `;
+  const res = await pool.query(queryText, [userId]);
+  return res.rows;
 }
 
-// Adicionar log ao sistema
-export function addLog(userId, action, details) {
-  const db = readDb();
-  if (!db.logs) db.logs = [];
-  
-  // Limitar logs a 500 registros para evitar consumo de disco excessivo
-  if (db.logs.length > 500) {
-    db.logs.shift();
-  }
+// Adicionar Log ao Sistema
+export async function addLog(userId, action, details) {
+  try {
+    // Limitar logs a 500 registros no banco para evitar uso de espaço excessivo
+    const countRes = await pool.query('SELECT COUNT(*) FROM logs');
+    const count = parseInt(countRes.rows[0].count, 10);
+    if (count > 500) {
+      await pool.query('DELETE FROM logs WHERE id IN (SELECT id FROM logs ORDER BY created_at ASC LIMIT $1)', [count - 499]);
+    }
 
-  const user = userId ? db.users.find(u => u.id === userId) : null;
-  const logEntry = {
-    id: crypto.randomUUID(),
-    userId: userId || null,
-    email: user ? user.email : (userId ? 'Desconhecido' : 'Sistema'),
-    action,
-    details,
-    createdAt: new Date().toISOString()
-  };
-  
-  db.logs.push(logEntry);
-  writeDb(db);
-  return logEntry;
+    // Buscar email do usuário se userId for fornecido
+    let email = 'Sistema';
+    if (userId) {
+      const userRes = await pool.query('SELECT email FROM users WHERE id = $1', [userId]);
+      if (userRes.rows.length > 0) email = userRes.rows[0].email;
+      else email = 'Desconhecido';
+    }
+
+    const id = crypto.randomUUID();
+    const queryText = `
+      INSERT INTO logs (id, user_id, email, action, details, created_at)
+      VALUES ($1, $2, $3, $4, $5, NOW())
+      RETURNING id, user_id AS "userId", email, action, details, created_at AS "createdAt"
+    `;
+    const res = await pool.query(queryText, [id, userId || null, email, action, details]);
+    return res.rows[0];
+  } catch (e) {
+    console.error('Falha ao escrever log no banco de dados:', e.message);
+    return null;
+  }
+}
+
+// Obter Lista de Logs
+export async function getLogs() {
+  const queryText = `
+    SELECT id, user_id AS "userId", email, action, details, created_at AS "createdAt"
+    FROM logs
+    ORDER BY created_at DESC
+  `;
+  const res = await pool.query(queryText);
+  return res.rows;
 }
 
 // Obter todos os usuários para administração
-export function getAllUsers() {
-  const db = readDb();
-  return db.users.map(u => {
-    const userHistory = db.history.filter(h => h.userId === u.id);
-    const totalSize = userHistory.reduce((sum, h) => sum + (h.size || 0), 0);
-    const { passwordHash: _, salt: __, ...userResponse } = u;
+export async function getAllUsers() {
+  const queryText = `
+    SELECT 
+      u.id, 
+      u.email, 
+      u.name, 
+      u.plan, 
+      u.role, 
+      u.status, 
+      u.avatar_initials AS "avatarInitials", 
+      u.avatar_color AS "avatarColor", 
+      u.created_at AS "createdAt",
+      COUNT(h.id) AS "historyCount",
+      COALESCE(SUM(h.size), 0) AS "totalSize"
+    FROM users u
+    LEFT JOIN history h ON u.id = h.user_id
+    GROUP BY u.id, u.email, u.name, u.plan, u.role, u.status, u.avatar_initials, u.avatar_color, u.created_at
+    ORDER BY u.created_at DESC
+  `;
+  const res = await pool.query(queryText);
+  return res.rows.map(row => {
     return {
-      ...userResponse,
-      historyCount: userHistory.length,
-      storageUsedGB: parseFloat((totalSize / (1024 * 1024 * 1024)).toFixed(3))
+      id: row.id,
+      email: row.email,
+      name: row.name,
+      plan: row.plan,
+      role: row.role,
+      status: row.status,
+      avatarInitials: row.avatarInitials,
+      avatarColor: row.avatarColor,
+      createdAt: row.createdAt,
+      historyCount: parseInt(row.historyCount, 10),
+      storageUsedGB: parseFloat((parseInt(row.totalSize, 10) / (1024 * 1024 * 1024)).toFixed(3))
     };
   });
 }
 
-// Atualizar status do usuário (ativar/suspender)
-export function updateUserStatus(userId, status) {
-  const db = readDb();
-  const user = db.users.find(u => u.id === userId);
-  if (!user) return null;
-  user.status = status;
-  writeDb(db);
-  return user;
+// Atualizar status do usuário
+export async function updateUserStatus(userId, status) {
+  const queryText = `
+    UPDATE users
+    SET status = $1
+    WHERE id = $2
+    RETURNING id, email, name, plan, role, status
+  `;
+  const res = await pool.query(queryText, [status, userId]);
+  return res.rows[0];
 }
 
-// Excluir usuário
-export function deleteUser(userId) {
-  const db = readDb();
-  db.users = db.users.filter(u => u.id !== userId);
-  db.history = db.history.filter(h => h.userId !== userId);
-  // Limpar sessões
-  Object.keys(db.sessions).forEach(token => {
-    if (db.sessions[token].userId === userId) {
-      delete db.sessions[token];
-    }
-  });
-  writeDb(db);
-  return true;
-}
+// Excluir usuário completamente
+export async function deleteUser(userId) {
+  const userRes = await pool.query('SELECT email FROM users WHERE id = $1', [userId]);
+  if (userRes.rows.length === 0) return null;
+  const email = userRes.rows[0].email;
 
-// Obter logs
-export function getLogs() {
-  const db = readDb();
-  return (db.logs || []).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  await pool.query('DELETE FROM sessions WHERE user_id = $1', [userId]);
+  await pool.query('DELETE FROM history WHERE user_id = $1', [userId]);
+  await pool.query('DELETE FROM logs WHERE user_id = $1', [userId]);
+  await pool.query('DELETE FROM users WHERE id = $1', [userId]);
+  return email;
 }
 
 // Configurações globais
-export function getSettings() {
-  const db = readDb();
-  if (!db.settings) {
-    db.settings = {
-      freeLimit: 10,
-      proLimit: 100,
-      maxFileSizeMB: 150
-    };
-    writeDb(db);
+export async function getSettings() {
+  const res = await pool.query('SELECT * FROM settings WHERE key = $1', ['global_limits']);
+  if (res.rows.length === 0) {
+    const insertRes = await pool.query(`
+      INSERT INTO settings (key, free_limit, pro_limit, max_file_size_mb)
+      VALUES ($1, $2, $3, $4)
+      RETURNING free_limit AS "freeLimit", pro_limit AS "proLimit", max_file_size_mb AS "maxFileSizeMB"
+    `, ['global_limits', 10, 100, 150]);
+    return insertRes.rows[0];
   }
-  return db.settings;
+  
+  const row = res.rows[0];
+  return {
+    freeLimit: row.free_limit,
+    proLimit: row.pro_limit,
+    maxFileSizeMB: row.max_file_size_mb
+  };
 }
 
-export function updateSettings(newSettings) {
-  const db = readDb();
-  db.settings = {
-    ...db.settings,
-    ...newSettings
-  };
-  writeDb(db);
-  return db.settings;
+export async function updateSettings(newSettings) {
+  const queryText = `
+    UPDATE settings
+    SET free_limit = COALESCE($1, free_limit),
+        pro_limit = COALESCE($2, pro_limit),
+        max_file_size_mb = COALESCE($3, max_file_size_mb)
+    WHERE key = $4
+    RETURNING free_limit AS "freeLimit", pro_limit AS "proLimit", max_file_size_mb AS "maxFileSizeMB"
+  `;
+  const res = await pool.query(queryText, [
+    newSettings.freeLimit || null,
+    newSettings.proLimit || null,
+    newSettings.maxFileSizeMB || null,
+    'global_limits'
+  ]);
+  return res.rows[0];
 }
+
+// Obter estatísticas administrativas agregadas
+export async function getAdminStats() {
+  const activeSessionsRes = await pool.query('SELECT COUNT(*) FROM sessions');
+  const totalProcessedRes = await pool.query('SELECT COUNT(*) FROM history');
+  const downloadsRes = await pool.query("SELECT COUNT(*) FROM logs WHERE action IN ('download', 'download_all')");
+  const uploadsRes = await pool.query("SELECT COUNT(*) FROM logs WHERE action = 'upload'");
+  return {
+    activeSessionsCount: parseInt(activeSessionsRes.rows[0].count, 10),
+    totalProcessed: parseInt(totalProcessedRes.rows[0].count, 10),
+    totalDownloads: parseInt(downloadsRes.rows[0].count, 10),
+    totalUploadsCount: parseInt(uploadsRes.rows[0].count, 10)
+  };
+}
+

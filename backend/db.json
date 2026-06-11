@@ -1,5 +1,47 @@
 {
-  "users": [],
-  "sessions": {},
-  "history": []
+  "users": [
+    {
+      "id": "c5c61615-dd6e-4b0b-b3a7-9c94d14bfb25",
+      "email": "reiadm@gmail.com",
+      "name": "reiadm",
+      "passwordHash": "b1be5ca8f2771751096d8ca52ace25fed96d1100b9a66d8db0cb6f4db385e3e64b445007e2e1a57e50c95754b08f9ed791be7136621dd0c38e633237ab860994",
+      "salt": "d8bb615687640bf807f223aa5e098854",
+      "plan": "Free",
+      "role": "admin",
+      "status": "active",
+      "avatarInitials": "RE",
+      "avatarColor": "linear-gradient(135deg, #10B981, #06B6D4)",
+      "createdAt": "2026-06-11T02:16:22.609Z"
+    }
+  ],
+  "sessions": {
+    "8039cd690caa08cb340b9b976388e031b1b96e988b14582aa917afa13d2bdf5f": {
+      "userId": "c5c61615-dd6e-4b0b-b3a7-9c94d14bfb25",
+      "createdAt": "2026-06-11T02:22:18.389Z"
+    }
+  },
+  "history": [],
+  "logs": [
+    {
+      "id": "2f73cb2d-c176-4384-a9cf-e54db200f6da",
+      "userId": "c5c61615-dd6e-4b0b-b3a7-9c94d14bfb25",
+      "email": "reiadm@gmail.com",
+      "action": "register",
+      "details": "Novo usuário registrado: reiadm (reiadm@gmail.com)",
+      "createdAt": "2026-06-11T02:16:22.613Z"
+    },
+    {
+      "id": "e11088e7-ffef-49a8-902d-4147eb58c219",
+      "userId": "c5c61615-dd6e-4b0b-b3a7-9c94d14bfb25",
+      "email": "reiadm@gmail.com",
+      "action": "login",
+      "details": "Usuário efetuou login: reiadm (reiadm@gmail.com)",
+      "createdAt": "2026-06-11T02:22:18.390Z"
+    }
+  ],
+  "settings": {
+    "freeLimit": 10,
+    "proLimit": 100,
+    "maxFileSizeMB": 150
+  }
 }

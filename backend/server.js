@@ -2,6 +2,9 @@ import express from 'express';
 import cors from 'cors';
 import multer from 'multer';
 import path from 'path';
+import dotenv from 'dotenv';
+
+dotenv.config();
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { v4 as uuidv4 } from 'uuid';
@@ -23,7 +26,8 @@ import {
   deleteUser,
   getLogs,
   getSettings,
-  updateSettings
+  updateSettings,
+  getAdminStats
 } from './database.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -121,7 +125,7 @@ const uploadPhoto = multer({
 });
 
 // Middleware de Autenticação
-const authenticate = (req, res, next) => {
+const authenticate = async (req, res, next) => {
   let token = req.query.token;
   if (!token) {
     const authHeader = req.headers.authorization;
@@ -134,106 +138,125 @@ const authenticate = (req, res, next) => {
     return res.status(401).json({ error: 'Acesso não autorizado. Faça login novamente.' });
   }
 
-  const user = getUserBySession(token);
-  if (!user) {
-    return res.status(401).json({ error: 'Sessão inválida ou expirada. Faça login novamente.' });
-  }
+  try {
+    const user = await getUserBySession(token);
+    if (!user) {
+      return res.status(401).json({ error: 'Sessão inválida ou expirada. Faça login novamente.' });
+    }
 
-  req.user = user;
-  req.token = token;
-  next();
+    req.user = user;
+    req.token = token;
+    next();
+  } catch (error) {
+    console.error('Erro no middleware de autenticação:', error);
+    res.status(500).json({ error: 'Erro interno do servidor ao verificar autenticação.' });
+  }
 };
 
 // ==========================================
 // ROTAS DE AUTENTICAÇÃO
 // ==========================================
 
-app.post('/api/auth/register', (req, res) => {
+app.post('/api/auth/register', async (req, res) => {
   const { email, password, name } = req.body;
   if (!email || !password || !name) {
     return res.status(400).json({ error: 'Por favor, preencha todos os campos.' });
   }
 
   try {
-    const user = createUser(email, password, name);
-    const token = createSession(user.id);
-    addLog(user.id, 'register', `Novo usuário registrado: ${user.name} (${user.email})`);
+    const user = await createUser(email, password, name);
+    const token = await createSession(user.id);
+    await addLog(user.id, 'register', `Novo usuário registrado: ${user.name} (${user.email})`);
     res.json({ token, user });
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
 });
 
-app.post('/api/auth/login', (req, res) => {
+app.post('/api/auth/login', async (req, res) => {
   const { email, password } = req.body;
   if (!email || !password) {
     return res.status(400).json({ error: 'Por favor, informe o e-mail e senha.' });
   }
 
-  const user = validateUser(email, password);
-  if (!user) {
-    addLog(null, 'login_failed', `Tentativa frustrada de login para: ${email}`);
-    return res.status(401).json({ error: 'Credenciais incorretas.' });
-  }
+  try {
+    const user = await validateUser(email, password);
+    if (!user) {
+      await addLog(null, 'login_failed', `Tentativa frustrada de login para: ${email}`);
+      return res.status(401).json({ error: 'Credenciais incorretas.' });
+    }
 
-  if (user.status === 'suspended') {
-    addLog(user.id, 'login_blocked', `Tentativa de login bloqueada para conta suspensa: ${email}`);
-    return res.status(403).json({ error: 'Sua conta foi suspensa por um administrador.' });
-  }
+    if (user.status === 'suspended') {
+      await addLog(user.id, 'login_blocked', `Tentativa de login bloqueada para conta suspensa: ${email}`);
+      return res.status(403).json({ error: 'Sua conta foi suspensa por um administrador.' });
+    }
 
-  const token = createSession(user.id);
-  addLog(user.id, 'login', `Usuário efetuou login: ${user.name} (${user.email})`);
-  res.json({ token, user });
+    const token = await createSession(user.id);
+    await addLog(user.id, 'login', `Usuário efetuou login: ${user.name} (${user.email})`);
+    res.json({ token, user });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Erro interno no servidor ao realizar login' });
+  }
 });
 
-app.post('/api/auth/logout', authenticate, (req, res) => {
-  destroySession(req.token);
+app.post('/api/auth/logout', authenticate, async (req, res) => {
+  await destroySession(req.token);
   res.json({ success: true });
 });
 
-app.get('/api/auth/me', authenticate, (req, res) => {
-  const history = getUserHistory(req.user.id);
-  
-  // Calcular estatísticas reais baseadas no histórico
-  const totalVideos = history.length;
-  const totalDurationSeconds = history.reduce((sum, h) => sum + (h.duration || 0), 0);
-  const timeSavedMinutes = Math.round((totalDurationSeconds / 60) * 30) || (totalVideos * 15); // Fallback: 15 mins por vídeo
-  
-  // Armazenamento real (em GB)
-  const storageUsedGB = parseFloat((history.reduce((sum, h) => sum + (h.size || 0), 0) / (1024 * 1024 * 1024)).toFixed(3));
+app.get('/api/auth/me', authenticate, async (req, res) => {
+  try {
+    const history = await getUserHistory(req.user.id);
+    
+    // Calcular estatísticas reais baseadas no histórico
+    const totalVideos = history.length;
+    const totalDurationSeconds = history.reduce((sum, h) => sum + (h.duration || 0), 0);
+    const timeSavedMinutes = Math.round((totalDurationSeconds / 60) * 30) || (totalVideos * 15); // Fallback: 15 mins por vídeo
+    
+    // Armazenamento real (em GB)
+    const storageUsedGB = parseFloat((history.reduce((sum, h) => sum + (h.size || 0), 0) / (1024 * 1024 * 1024)).toFixed(3));
 
-  // Cota usada no mês corrente
-  const currentMonth = new Date().getMonth();
-  const currentYear = new Date().getFullYear();
-  const quotaUsed = history.filter(h => {
-    const d = new Date(h.createdAt);
-    return d.getMonth() === currentMonth && d.getFullYear() === currentYear;
-  }).length;
+    // Cota usada no mês corrente
+    const currentMonth = new Date().getMonth();
+    const currentYear = new Date().getFullYear();
+    const quotaUsed = history.filter(h => {
+      const d = new Date(h.createdAt);
+      return d.getMonth() === currentMonth && d.getFullYear() === currentYear;
+    }).length;
 
-  res.json({
-    user: req.user,
-    history,
-    stats: {
-      totalVideos,
-      timeSavedMinutes,
-      storageUsedGB,
-      quotaUsed
-    }
-  });
+    res.json({
+      user: req.user,
+      history,
+      stats: {
+        totalVideos,
+        timeSavedMinutes,
+        storageUsedGB,
+        quotaUsed
+      }
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Erro ao buscar dados do perfil' });
+  }
 });
 
-app.post('/api/auth/upgrade', authenticate, (req, res) => {
+app.post('/api/auth/upgrade', authenticate, async (req, res) => {
   const { plan } = req.body;
   if (!plan) return res.status(400).json({ error: 'Plano não fornecido.' });
 
-  const updatedUser = upgradeUserPlan(req.user.id, plan);
-  res.json({ user: updatedUser });
+  try {
+    const updatedUser = await upgradeUserPlan(req.user.id, plan);
+    res.json({ user: updatedUser });
+  } catch (error) {
+    res.status(500).json({ error: 'Erro ao atualizar plano' });
+  }
 });
 
-app.post('/api/auth/profile', authenticate, (req, res) => {
+app.post('/api/auth/profile', authenticate, async (req, res) => {
   const { name, email, avatarInitials, avatarColor } = req.body;
   try {
-    const updatedUser = updateUserProfile(req.user.id, { name, email, avatarInitials, avatarColor });
+    const updatedUser = await updateUserProfile(req.user.id, { name, email, avatarInitials, avatarColor });
     res.json({ user: updatedUser });
   } catch (e) {
     res.status(400).json({ error: e.message });
@@ -263,7 +286,7 @@ app.post('/api/upload-intro-photo', authenticate, (req, res) => {
 
 // Rota de Upload de Vídeo
 app.post('/api/upload', authenticate, (req, res) => {
-  upload.array('videos', 10)(req, res, (err) => {
+  upload.array('videos', 10)(req, res, async (err) => {
     if (err instanceof multer.MulterError) {
       return res.status(400).json({ error: `Erro no upload: ${err.message}` });
     } else if (err) {
@@ -275,7 +298,7 @@ app.post('/api/upload', authenticate, (req, res) => {
     }
 
     const newTasks = [];
-    req.files.forEach((file) => {
+    for (const file of req.files) {
       const taskId = uuidv4();
       const task = {
         id: taskId,
@@ -299,8 +322,8 @@ app.post('/api/upload', authenticate, (req, res) => {
         progress: task.progress
       });
 
-      addLog(req.user.id, 'upload', `Upload de vídeo realizado: ${file.originalname} (${(file.size / (1024 * 1024)).toFixed(2)} MB)`);
-    });
+      await addLog(req.user.id, 'upload', `Upload de vídeo realizado: ${file.originalname} (${(file.size / (1024 * 1024)).toFixed(2)} MB)`);
+    }
 
     res.json({ tasks: newTasks });
   });
@@ -364,7 +387,7 @@ app.post('/api/process', authenticate, async (req, res) => {
     task.progress = 0;
     task.errorMsg = null;
     
-    addLog(req.user.id, 'processing_start', `Iniciou o processamento do vídeo: ${task.originalName} (${preset === 'shorts' ? 'Shorts' : 'Reels'})`);
+    await addLog(req.user.id, 'processing_start', `Iniciou o processamento do vídeo: ${task.originalName} (${preset === 'shorts' ? 'Shorts' : 'Reels'})`);
 
     try {
       const result = await processVideo({
@@ -381,7 +404,7 @@ app.post('/api/process', authenticate, async (req, res) => {
       });
 
       // Salvar no histórico persistente do banco local
-      addHistory(
+      await addHistory(
         req.user.id,
         task.originalName,
         task.size,
@@ -389,19 +412,19 @@ app.post('/api/process', authenticate, async (req, res) => {
         result.duration || 10
       );
 
-      addLog(req.user.id, 'processing_success', `Processamento concluído com sucesso: ${task.originalName} (${Math.round(result.duration || 10)}s)`);
+      await addLog(req.user.id, 'processing_success', `Processamento concluído com sucesso: ${task.originalName} (${Math.round(result.duration || 10)}s)`);
 
     } catch (err) {
       task.status = 'error';
       task.errorMsg = err.message || 'Erro inesperado durante a edição';
       console.error(`Erro ao processar tarefa ${task.id}:`, err);
-      addLog(req.user.id, 'processing_error', `Erro ao processar vídeo ${task.originalName}: ${err.message}`);
+      await addLog(req.user.id, 'processing_error', `Erro ao processar vídeo ${task.originalName}: ${err.message}`);
     }
   });
 });
 
 // Rota para baixar todos os vídeos concluídos do usuário em formato ZIP
-app.get('/api/download-all', authenticate, (req, res) => {
+app.get('/api/download-all', authenticate, async (req, res) => {
   const completedTasks = Object.values(tasksStore)
     .filter(t => t.userId === req.user.id && t.status === 'completed');
 
@@ -427,7 +450,7 @@ app.get('/api/download-all', authenticate, (req, res) => {
 
   const zipBuffer = zip.toBuffer();
   
-  addLog(req.user.id, 'download_all', `Usuário baixou pacote ZIP de vídeos contendo ${filesAdded} arquivos`);
+  await addLog(req.user.id, 'download_all', `Usuário baixou pacote ZIP de vídeos contendo ${filesAdded} arquivos`);
 
   res.setHeader('Content-Type', 'application/zip');
   res.setHeader('Content-Disposition', 'attachment; filename="videos_editados.zip"');
@@ -435,7 +458,7 @@ app.get('/api/download-all', authenticate, (req, res) => {
 });
 
 // Rota para baixar um vídeo individual diretamente como MP4
-app.get('/api/download/:id', authenticate, (req, res) => {
+app.get('/api/download/:id', authenticate, async (req, res) => {
   const task = tasksStore[req.params.id];
   if (!task || task.userId !== req.user.id || !fs.existsSync(task.outputPath)) {
     return res.status(404).json({ error: 'Vídeo não encontrado ou de outro usuário.' });
@@ -443,7 +466,7 @@ app.get('/api/download/:id', authenticate, (req, res) => {
   const baseName = path.basename(task.originalName, path.extname(task.originalName));
   const cleanName = `${baseName}_editado.mp4`;
   
-  addLog(req.user.id, 'download', `Usuário baixou vídeo editado: ${task.originalName}`);
+  await addLog(req.user.id, 'download', `Usuário baixou vídeo editado: ${task.originalName}`);
   
   res.download(task.outputPath, cleanName);
 });
@@ -494,14 +517,13 @@ const requireAdmin = (req, res, next) => {
 };
 
 // Endpoints administrativos protegidos
-app.get('/api/admin/stats', authenticate, requireAdmin, (req, res) => {
+app.get('/api/admin/stats', authenticate, requireAdmin, async (req, res) => {
   try {
-    const users = getAllUsers();
+    const users = await getAllUsers();
     const totalUsers = users.length;
     
-    // Contar usuários ativos (com sessões ativas)
-    const db = JSON.parse(fs.readFileSync(path.join(__dirname, 'db.json'), 'utf-8'));
-    const activeSessionsCount = Object.keys(db.sessions || {}).length;
+    // Contar usuários ativos, total de vídeos processados, downloads e uploads do banco
+    const dbStats = await getAdminStats();
     
     // Novos cadastros hoje, esta semana e este mês
     const now = new Date();
@@ -524,9 +546,6 @@ app.get('/api/admin/stats', authenticate, requireAdmin, (req, res) => {
     const proCount = users.filter(u => u.plan === 'Pro').length;
     const businessCount = users.filter(u => u.plan === 'Business').length;
     
-    // Total de vídeos processados e uploads
-    const totalProcessed = db.history ? db.history.length : 0;
-    
     // Cálculo do tamanho dos diretórios físicos
     const getDirSize = (dirPath) => {
       let size = 0;
@@ -544,23 +563,18 @@ app.get('/api/admin/stats', authenticate, requireAdmin, (req, res) => {
     const outputsSize = getDirSize(OUTPUTS_DIR);
     const totalDiskUsedGB = parseFloat(((uploadsSize + outputsSize) / (1024 * 1024 * 1024)).toFixed(3));
     
-    // Downloads e processamentos simulados/reais
-    const logs = db.logs || [];
-    const downloadsCount = logs.filter(l => l.action === 'download' || l.action === 'download_all').length;
-    const totalUploadsCount = logs.filter(l => l.action === 'upload').length;
-    
     res.json({
       totalUsers,
-      activeUsers: activeSessionsCount,
+      activeUsers: dbStats.activeSessionsCount,
       createdToday,
       createdThisWeek,
       createdThisMonth,
       freeCount,
       proCount,
       businessCount,
-      totalProcessed,
-      totalUploads: totalUploadsCount || totalProcessed,
-      totalDownloads: downloadsCount,
+      totalProcessed: dbStats.totalProcessed,
+      totalUploads: dbStats.totalUploadsCount || dbStats.totalProcessed,
+      totalDownloads: dbStats.totalDownloads,
       totalDiskUsedGB,
       avgStorageUsedPerUserGB: totalUsers > 0 ? parseFloat((totalDiskUsedGB / totalUsers).toFixed(3)) : 0,
       systemStatus: 'online'
@@ -571,83 +585,81 @@ app.get('/api/admin/stats', authenticate, requireAdmin, (req, res) => {
   }
 });
 
-app.get('/api/admin/users', authenticate, requireAdmin, (req, res) => {
+app.get('/api/admin/users', authenticate, requireAdmin, async (req, res) => {
   try {
-    const users = getAllUsers();
+    const users = await getAllUsers();
     res.json({ users });
   } catch (error) {
     res.status(500).json({ error: 'Erro ao listar usuários' });
   }
 });
 
-app.post('/api/admin/users/:id/plan', authenticate, requireAdmin, (req, res) => {
+app.post('/api/admin/users/:id/plan', authenticate, requireAdmin, async (req, res) => {
   const { plan } = req.body;
   if (!plan) return res.status(400).json({ error: 'Plano não fornecido.' });
   
   try {
-    const updated = upgradeUserPlan(req.params.id, plan);
+    const updated = await upgradeUserPlan(req.params.id, plan);
     if (!updated) return res.status(404).json({ error: 'Usuário não encontrado.' });
     
-    addLog(req.user.id, 'admin_change_plan', `Admin alterou plano do usuário ${updated.email} para ${plan}`);
+    await addLog(req.user.id, 'admin_change_plan', `Admin alterou plano do usuário ${updated.email} para ${plan}`);
     res.json({ user: updated });
   } catch (error) {
     res.status(500).json({ error: 'Erro ao alterar plano do usuário.' });
   }
 });
 
-app.post('/api/admin/users/:id/status', authenticate, requireAdmin, (req, res) => {
+app.post('/api/admin/users/:id/status', authenticate, requireAdmin, async (req, res) => {
   const { status } = req.body;
   if (!status || !['active', 'suspended'].includes(status)) {
     return res.status(400).json({ error: 'Status inválido.' });
   }
   
   try {
-    const updated = updateUserStatus(req.params.id, status);
+    const updated = await updateUserStatus(req.params.id, status);
     if (!updated) return res.status(404).json({ error: 'Usuário não encontrado.' });
     
-    addLog(req.user.id, `admin_${status}`, `Admin alterou status do usuário ${updated.email} para ${status}`);
+    await addLog(req.user.id, `admin_${status}`, `Admin alterou status do usuário ${updated.email} para ${status}`);
     res.json({ user: updated });
   } catch (error) {
     res.status(500).json({ error: 'Erro ao alterar status do usuário.' });
   }
 });
 
-app.delete('/api/admin/users/:id', authenticate, requireAdmin, (req, res) => {
+app.delete('/api/admin/users/:id', authenticate, requireAdmin, async (req, res) => {
   try {
-    const db = JSON.parse(fs.readFileSync(path.join(__dirname, 'db.json'), 'utf-8'));
-    const targetUser = db.users.find(u => u.id === req.params.id);
-    if (!targetUser) return res.status(404).json({ error: 'Usuário não encontrado.' });
+    const deletedUserEmail = await deleteUser(req.params.id);
+    if (!deletedUserEmail) return res.status(404).json({ error: 'Usuário não encontrado.' });
     
-    deleteUser(req.params.id);
-    addLog(req.user.id, 'admin_delete_user', `Admin excluiu o usuário permanentemente: ${targetUser.email}`);
+    await addLog(req.user.id, 'admin_delete_user', `Admin excluiu o usuário permanentemente: ${deletedUserEmail}`);
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: 'Erro ao excluir usuário.' });
   }
 });
 
-app.get('/api/admin/logs', authenticate, requireAdmin, (req, res) => {
+app.get('/api/admin/logs', authenticate, requireAdmin, async (req, res) => {
   try {
-    const logs = getLogs();
+    const logs = await getLogs();
     res.json({ logs });
   } catch (error) {
     res.status(500).json({ error: 'Erro ao buscar logs' });
   }
 });
 
-app.get('/api/admin/settings', authenticate, requireAdmin, (req, res) => {
+app.get('/api/admin/settings', authenticate, requireAdmin, async (req, res) => {
   try {
-    const settings = getSettings();
+    const settings = await getSettings();
     res.json({ settings });
   } catch (error) {
     res.status(500).json({ error: 'Erro ao buscar configurações' });
   }
 });
 
-app.post('/api/admin/settings', authenticate, requireAdmin, (req, res) => {
+app.post('/api/admin/settings', authenticate, requireAdmin, async (req, res) => {
   try {
-    const settings = updateSettings(req.body);
-    addLog(req.user.id, 'admin_update_settings', 'Admin atualizou as configurações de limites da plataforma');
+    const settings = await updateSettings(req.body);
+    await addLog(req.user.id, 'admin_update_settings', 'Admin atualizou as configurações de limites da plataforma');
     res.json({ settings });
   } catch (error) {
     res.status(500).json({ error: 'Erro ao salvar configurações' });
