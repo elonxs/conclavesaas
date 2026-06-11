@@ -121,8 +121,9 @@ export async function processVideo(options, onProgress) {
       .videoCodec('libx264')
       .audioCodec('aac')
       .outputOptions([
-        '-preset fast',
+        '-preset ultrafast',
         '-crf 23',
+        '-threads 1',
         '-movflags +faststart' // Carrega mais rápido na web
       ])
       .output(outputPath)
