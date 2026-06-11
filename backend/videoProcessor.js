@@ -86,38 +86,32 @@ export async function processVideo(options, onProgress) {
     
     // Entrada 1: Foto (loop de 0.5 segundos a 30fps para introdução)
     command = command.input(photoPath).inputOptions(['-loop 1', '-r 30', '-t 0.5']);
-    
-    // Entrada 2: Tela preta de encerramento gerada dinamicamente via lavfi
-    command = command.input(`color=c=black:s=1080x1920:rate=30:d=${blackScreenDuration}`).inputFormat('lavfi');
-
-    // Entrada 3: Silêncio de 0.5 segundos para o áudio da foto de introdução
-    command = command.input('anullsrc=channel_layout=stereo:sample_rate=44100:d=0.5').inputFormat('lavfi');
-
-    // Entrada 4: Silêncio para a tela preta de encerramento
-    command = command.input(`anullsrc=channel_layout=stereo:sample_rate=44100:d=${blackScreenDuration}`).inputFormat('lavfi');
-
-    // Entrada 5: Silêncio para o vídeo original caso ele não possua áudio (usando index 5 se não houver áudio)
-    if (!hasAudio) {
-      command = command.input(`anullsrc=channel_layout=stereo:sample_rate=44100:d=${duration}`).inputFormat('lavfi');
-    }
 
     // Filtros de vídeo e áudio
-    // 1. Redimensiona e padroniza tudo para 1080x1920 (Portait / Mobile HD)
-    // 2. Concatena Foto (Intro) -> Vídeo do Usuário -> Tela Preta (Outro)
+    // 1. Gera silêncio e tela preta dinamicamente via filtros de origem
+    // 2. Redimensiona e padroniza tudo para 1080x1920 (Portait / Mobile HD)
+    // 3. Concatena Foto (Intro) -> Vídeo do Usuário -> Tela Preta (Outro)
     let filterComplex = '';
+    
+    // Gerar fontes de áudio e vídeo dinamicamente dentro do complexFilter
+    filterComplex += `color=c=black:s=1080x1920:r=30:d=${blackScreenDuration}[v2_scaled];`;
+    filterComplex += `anullsrc=channel_layout=stereo:sample_rate=44100:d=0.5[a1_silence];`;
+    filterComplex += `anullsrc=channel_layout=stereo:sample_rate=44100:d=${blackScreenDuration}[a2_silence];`;
+    if (!hasAudio) {
+      filterComplex += `anullsrc=channel_layout=stereo:sample_rate=44100:d=${duration}[a0_silence];`;
+    }
     
     // Escalar inputs para garantir dimensões 1080x1920 exatamente
     filterComplex += `[1:v]scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1[v1_intro];`;
     filterComplex += `[0:v]scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1[v0_scaled];`;
-    filterComplex += `[2:v]scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1[v2_scaled];`;
 
-    // Concatenação de 3 segmentos: Intro (1s), Principal (duration), Tela Preta (blackScreenDuration)
+    // Concatenação de 3 segmentos: Intro (0.5s), Principal (duration), Tela Preta (blackScreenDuration)
     if (hasAudio) {
-      // Vídeo original tem áudio (0:a), intro tem silêncio (3:a) e tela preta tem silêncio (4:a)
-      filterComplex += `[v1_intro][3:a][v0_scaled][0:a][v2_scaled][4:a]concat=n=3:v=1:a=1[v_out][a_out]`;
+      // Vídeo original tem áudio (0:a), intro tem silêncio (a1_silence) e tela preta tem silêncio (a2_silence)
+      filterComplex += `[v1_intro][a1_silence][v0_scaled][0:a][v2_scaled][a2_silence]concat=n=3:v=1:a=1[v_out][a_out]`;
     } else {
-      // Vídeo original não tem áudio (usamos silêncio 5:a), intro tem silêncio (3:a) e tela preta tem silêncio (4:a)
-      filterComplex += `[v1_intro][3:a][v0_scaled][5:a][v2_scaled][4:a]concat=n=3:v=1:a=1[v_out][a_out]`;
+      // Vídeo original não tem áudio (usamos silêncio a0_silence), intro tem silêncio (a1_silence) e tela preta tem silêncio (a2_silence)
+      filterComplex += `[v1_intro][a1_silence][v0_scaled][a0_silence][v2_scaled][a2_silence]concat=n=3:v=1:a=1[v_out][a_out]`;
     }
 
     command
