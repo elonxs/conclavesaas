@@ -7,146 +7,224 @@ import os from 'os';
 
 ffmpeg.setFfmpegPath(ffmpegStatic);
 
-// Número de threads disponíveis no servidor (usa todos os núcleos)
 const CPU_THREADS = os.cpus().length;
 
-// Helper para rodar o ffmpeg e obter informações básicas do vídeo (duração e se tem áudio)
+// Parâmetros de codec COMPARTILHADOS entre todos os segmentos
+// (devem ser idênticos para o concat -c copy funcionar)
+const VIDEO_ENCODE_OPTS = [
+  '-c:v', 'libx264',
+  '-preset', 'ultrafast',
+  '-tune', 'zerolatency',
+  '-crf', '26',
+  '-pix_fmt', 'yuv420p',
+  '-r', '24',
+  '-threads', String(CPU_THREADS),
+];
+
+const AUDIO_ENCODE_OPTS = [
+  '-c:a', 'aac',
+  '-b:a', '128k',
+  '-ar', '44100',
+  '-ac', '2',
+];
+
+// Helper para obter informações do vídeo
 export function getVideoInfo(filePath) {
   return new Promise((resolve) => {
     exec(`"${ffmpegStatic}" -i "${filePath}"`, (err, stdout, stderr) => {
       const output = stderr || stdout;
-      
-      // Parsear duração
+
       const durationMatch = output.match(/Duration: (\d{2}):(\d{2}):(\d{2})\.(\d{2})/);
-      let duration = 10; // Padrão
+      let duration = 10;
       if (durationMatch) {
-        const hours = parseInt(durationMatch[1], 10);
-        const minutes = parseInt(durationMatch[2], 10);
-        const seconds = parseInt(durationMatch[3], 10);
-        const centiseconds = parseInt(durationMatch[4], 10);
-        duration = hours * 3600 + minutes * 60 + seconds + centiseconds / 100;
+        duration =
+          parseInt(durationMatch[1], 10) * 3600 +
+          parseInt(durationMatch[2], 10) * 60 +
+          parseInt(durationMatch[3], 10) +
+          parseInt(durationMatch[4], 10) / 100;
       }
-      
-      // Verificar se o arquivo possui stream de áudio
+
       const hasAudio = output.includes('Audio:');
-      
       resolve({ duration, hasAudio });
     });
   });
 }
 
-// Converte string timemark (hh:mm:ss.xs) em segundos
+// Converte timemark para segundos
 function timemarkToSeconds(timemark) {
   if (!timemark) return 0;
   const parts = timemark.split(':');
   if (parts.length === 3) {
-    const hours = parseFloat(parts[0]);
-    const minutes = parseFloat(parts[1]);
-    const seconds = parseFloat(parts[2]);
-    return hours * 3600 + minutes * 60 + seconds;
+    return parseFloat(parts[0]) * 3600 + parseFloat(parts[1]) * 60 + parseFloat(parts[2]);
   }
   return 0;
 }
 
-export async function processVideo(options, onProgress) {
-  const {
-    inputPath,
-    outputPath,
-    blackScreenDuration = 60,
-    customPhotoPath,
-    assetsDir
-  } = options;
-
-  const { duration, hasAudio } = await getVideoInfo(inputPath);
-  
-  // Selecionar foto (personalizada ou aleatória)
-  let photoPath = '';
-  if (customPhotoPath && fs.existsSync(customPhotoPath)) {
-    photoPath = customPhotoPath;
-    console.log(`[Processor] Usando foto de introdução personalizada: ${path.basename(photoPath)}`);
-  } else {
-    const photosDir = path.join(assetsDir, 'photos');
-    const photos = fs.readdirSync(photosDir).filter(f => f.endsWith('.jpg') || f.endsWith('.png'));
-    if (photos.length === 0) {
-      throw new Error('Nenhuma foto encontrada para inserção.');
+// ETAPA 1: Gera/reutiliza cache da tela preta usando complexFilter
+// (compatível com ffmpeg-static: usa color= como filtro, não como demuxer)
+function generateBlackSegment(cachePath, durationSeconds) {
+  return new Promise((resolve, reject) => {
+    if (fs.existsSync(cachePath)) {
+      console.log(`[Processor] ♻️  Reutilizando cache de tela preta (${durationSeconds}s)`);
+      return resolve(cachePath);
     }
-    const randomPhoto = photos[Math.floor(Math.random() * photos.length)];
-    photoPath = path.join(photosDir, randomPhoto);
-    console.log(`[Processor] Usando foto de introdução aleatória: ${randomPhoto}`);
-  }
 
-  console.log(`[Processor] CPUs disponíveis: ${CPU_THREADS} threads`);
-  console.log(`[Processor] Processando: ${path.basename(inputPath)}`);
-  console.log(`[Processor] Duração original: ${duration.toFixed(2)}s | Tem áudio: ${hasAudio}`);
-  console.log(`[Processor] Intro: 0.5s | Tela preta final: ${blackScreenDuration}s`);
+    console.log(`[Processor] 🎨 Gerando cache de tela preta (${durationSeconds}s) com CRF 50...`);
+    ffmpeg()
+      .complexFilter([
+        `color=c=black:s=1080x1920:r=24:d=${durationSeconds},format=yuv420p[vout]`,
+        `aevalsrc=0:channel_layout=stereo:sample_rate=44100:duration=${durationSeconds}[aout]`,
+      ])
+      .map('[vout]')
+      .map('[aout]')
+      .outputOptions([
+        '-c:v', 'libx264',
+        '-preset', 'ultrafast',
+        '-crf', '50',        // CRF 50 para tela preta: quase sem dados, gera em 1-3s
+        '-pix_fmt', 'yuv420p',
+        '-r', '24',
+        '-threads', String(CPU_THREADS),
+        '-c:a', 'aac',
+        '-b:a', '32k',       // Áudio mínimo para silêncio
+        '-ar', '44100',
+        '-ac', '2',
+        '-movflags', '+faststart',
+      ])
+      .output(cachePath)
+      .on('end', () => {
+        console.log(`[Processor] ✅ Cache de tela preta pronto!`);
+        resolve(cachePath);
+      })
+      .on('error', reject)
+      .run();
+  });
+}
 
-  const finalDuration = 0.5 + duration + blackScreenDuration;
-
+// ETAPA 2: Encodar intro + conteúdo principal (só os segundos que importam!)
+function encodeMainContent(inputPath, photoPath, hasAudio, duration, tempPath, onSubProgress) {
   return new Promise((resolve, reject) => {
     let command = ffmpeg();
-    
-    // Entrada 0: Vídeo original do usuário
     command = command.input(inputPath);
-    
-    // Entrada 1: Foto de introdução (0.5s estático a 24fps)
     command = command.input(photoPath).inputOptions(['-loop 1', '-r 24', '-t 0.5']);
 
-    // Filtros: geração inline de tela preta e silêncios via complexFilter
-    // (compatível com ffmpeg-static que não tem o demuxer lavfi externo)
+    const totalDuration = 0.5 + duration;
     let filterComplex = '';
-    
-    // Gerar tela preta e silêncios diretamente via filtros internos do FFmpeg
-    filterComplex += `color=c=black:s=1080x1920:r=24:d=${blackScreenDuration}[v2_scaled];`;
+
     filterComplex += `aevalsrc=0:channel_layout=stereo:sample_rate=44100:duration=0.5[a1_silence];`;
-    filterComplex += `aevalsrc=0:channel_layout=stereo:sample_rate=44100:duration=${blackScreenDuration}[a2_silence];`;
     if (!hasAudio) {
       filterComplex += `aevalsrc=0:channel_layout=stereo:sample_rate=44100:duration=${duration}[a0_silence];`;
     }
-    
-    // Escalar foto de intro para 1080x1920 a 24fps
-    filterComplex += `[1:v]scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=24[v1_intro];`;
-    // Escalar vídeo principal para 1080x1920 a 24fps
-    filterComplex += `[0:v]scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=24[v0_scaled];`;
+    filterComplex += `[1:v]scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=24,format=yuv420p[v1_intro];`;
+    filterComplex += `[0:v]scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=24,format=yuv420p[v0_scaled];`;
 
-    // Concatenação: Intro (0.5s) → Vídeo Principal → Tela Preta
     if (hasAudio) {
-      filterComplex += `[v1_intro][a1_silence][v0_scaled][0:a][v2_scaled][a2_silence]concat=n=3:v=1:a=1[v_out][a_out]`;
+      filterComplex += `[v1_intro][a1_silence][v0_scaled][0:a]concat=n=2:v=1:a=1[v_out][a_out]`;
     } else {
-      filterComplex += `[v1_intro][a1_silence][v0_scaled][a0_silence][v2_scaled][a2_silence]concat=n=3:v=1:a=1[v_out][a_out]`;
+      filterComplex += `[v1_intro][a1_silence][v0_scaled][a0_silence]concat=n=2:v=1:a=1[v_out][a_out]`;
     }
 
     command
       .complexFilter(filterComplex)
       .map('[v_out]')
       .map('[a_out]')
-      .videoCodec('libx264')
-      .audioCodec('aac')
       .outputOptions([
-        '-preset ultrafast',       // Máxima velocidade de codificação
-        '-tune zerolatency',       // Encoding rápido sem buffer acumulado
-        '-crf 26',                 // Equilíbrio ótimo entre qualidade e velocidade para mobile
-        `-threads ${CPU_THREADS}`, // Usar TODOS os núcleos do servidor
-        '-movflags +faststart',    // Streaming/carregamento rápido na web
-        '-b:a 128k'                // Qualidade de áudio adequada para mobile
+        ...VIDEO_ENCODE_OPTS,
+        ...AUDIO_ENCODE_OPTS,
+        '-movflags', '+faststart',
       ])
-      .output(outputPath)
-      .on('start', () => {
-        console.log(`[Processor] FFmpeg iniciado com ${CPU_THREADS} threads (ultrafast + zerolatency)`);
-      })
+      .output(tempPath)
       .on('progress', (progress) => {
         const elapsed = timemarkToSeconds(progress.timemark);
-        const percent = Math.min(Math.round((elapsed / finalDuration) * 100), 99);
-        onProgress(percent);
+        // Progresso de 10% a 70% durante a etapa de conteúdo
+        const pct = Math.min(10 + Math.round((elapsed / totalDuration) * 60), 70);
+        onSubProgress(pct);
       })
+      .on('end', () => resolve(tempPath))
+      .on('error', reject)
+      .run();
+  });
+}
+
+// ETAPA 3: Concatenar os segmentos SEM re-encodar (stream copy - quase instantâneo!)
+function concatSegments(contentPath, blackPath, outputPath) {
+  return new Promise((resolve, reject) => {
+    const concatListPath = outputPath + '.txt';
+    // Escapar aspas simples nos caminhos (necessário para o concat demuxer)
+    const contentEscaped = contentPath.replace(/'/g, "'\\''");
+    const blackEscaped = blackPath.replace(/'/g, "'\\''");
+    fs.writeFileSync(concatListPath, `file '${contentEscaped}'\nfile '${blackEscaped}'\n`);
+
+    ffmpeg()
+      .input(concatListPath)
+      .inputOptions(['-f', 'concat', '-safe', '0'])
+      .outputOptions(['-c', 'copy', '-movflags', '+faststart'])
+      .output(outputPath)
       .on('end', () => {
-        console.log(`[Processor] Sucesso! Vídeo salvo em: ${path.basename(outputPath)}`);
-        onProgress(100);
-        resolve({ duration });
+        if (fs.existsSync(concatListPath)) fs.unlinkSync(concatListPath);
+        resolve();
       })
       .on('error', (err) => {
-        console.error(`[Processor] Erro no FFmpeg para ${path.basename(inputPath)}:`, err.message);
+        if (fs.existsSync(concatListPath)) fs.unlinkSync(concatListPath);
         reject(err);
       })
       .run();
   });
+}
+
+// Processamento principal em MODO TURBO (3 etapas, tela preta em paralelo)
+export async function processVideo(options, onProgress) {
+  const {
+    inputPath,
+    outputPath,
+    blackScreenDuration = 60,
+    customPhotoPath,
+    assetsDir,
+  } = options;
+
+  const { duration, hasAudio } = await getVideoInfo(inputPath);
+
+  // Selecionar foto de introdução
+  let photoPath = '';
+  if (customPhotoPath && fs.existsSync(customPhotoPath)) {
+    photoPath = customPhotoPath;
+    console.log(`[Processor] Usando foto personalizada: ${path.basename(photoPath)}`);
+  } else {
+    const photosDir = path.join(assetsDir, 'photos');
+    const photos = fs.readdirSync(photosDir).filter(f => f.endsWith('.jpg') || f.endsWith('.png'));
+    if (photos.length === 0) throw new Error('Nenhuma foto encontrada para inserção.');
+    const randomPhoto = photos[Math.floor(Math.random() * photos.length)];
+    photoPath = path.join(photosDir, randomPhoto);
+    console.log(`[Processor] Usando foto aleatória: ${randomPhoto}`);
+  }
+
+  console.log(`[Processor] 🚀 MODO TURBO | ${CPU_THREADS} threads | ${duration.toFixed(2)}s de conteúdo + ${blackScreenDuration}s de tela preta`);
+  onProgress(5);
+
+  // Cache da tela preta fica na pasta outputs (compartilhado entre todas as edições)
+  const blackCachePath = path.join(
+    path.dirname(outputPath),
+    `_black_cache_${blackScreenDuration}s.mp4`
+  );
+
+  // Arquivo temporário do conteúdo principal
+  const tempContentPath = outputPath + '.content.mp4';
+
+  // ⚡ PARALELO: Gerar/reutilizar tela preta E encodar conteúdo ao mesmo tempo!
+  const [, ] = await Promise.all([
+    generateBlackSegment(blackCachePath, blackScreenDuration),
+    encodeMainContent(inputPath, photoPath, hasAudio, duration, tempContentPath, onProgress),
+  ]);
+
+  onProgress(80);
+  console.log(`[Processor] 🔗 Concatenando segmentos (stream copy, sem re-encodar)...`);
+
+  // ⚡ CONCAT: Juntar sem re-encodar (quase instantâneo!)
+  await concatSegments(tempContentPath, blackCachePath, outputPath);
+
+  // Limpar arquivo temporário do conteúdo
+  if (fs.existsSync(tempContentPath)) fs.unlinkSync(tempContentPath);
+
+  console.log(`[Processor] ✅ Concluído! ${path.basename(outputPath)}`);
+  onProgress(100);
+  return { duration };
 }
