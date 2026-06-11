@@ -138,7 +138,7 @@ export async function processVideo(options, onProgress) {
       .on('end', () => {
         console.log(`[Processor] Sucesso! Vídeo salvo em: ${path.basename(outputPath)}`);
         onProgress(100);
-        resolve();
+        resolve({ duration });
       })
       .on('error', (err) => {
         console.error(`[Processor] Erro no FFmpeg para ${path.basename(inputPath)}:`, err.message);
