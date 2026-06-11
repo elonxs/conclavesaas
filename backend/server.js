@@ -409,7 +409,7 @@ app.post('/api/process', authenticate, async (req, res) => {
         task.originalName,
         task.size,
         preset === 'shorts' ? 'Shorts (9:16)' : 'Reels (9:16)',
-        result.duration || 10
+        Math.round(result.duration || 10)
       );
 
       await addLog(req.user.id, 'processing_success', `Processamento concluído com sucesso: ${task.originalName} (${Math.round(result.duration || 10)}s)`);
