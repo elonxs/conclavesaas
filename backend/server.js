@@ -16,7 +16,14 @@ import {
   updateUserProfile,
   upgradeUserPlan,
   addHistory,
-  getUserHistory
+  getUserHistory,
+  addLog,
+  getAllUsers,
+  updateUserStatus,
+  deleteUser,
+  getLogs,
+  getSettings,
+  updateSettings
 } from './database.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -150,6 +157,7 @@ app.post('/api/auth/register', (req, res) => {
   try {
     const user = createUser(email, password, name);
     const token = createSession(user.id);
+    addLog(user.id, 'register', `Novo usuário registrado: ${user.name} (${user.email})`);
     res.json({ token, user });
   } catch (e) {
     res.status(400).json({ error: e.message });
@@ -164,10 +172,17 @@ app.post('/api/auth/login', (req, res) => {
 
   const user = validateUser(email, password);
   if (!user) {
+    addLog(null, 'login_failed', `Tentativa frustrada de login para: ${email}`);
     return res.status(401).json({ error: 'Credenciais incorretas.' });
   }
 
+  if (user.status === 'suspended') {
+    addLog(user.id, 'login_blocked', `Tentativa de login bloqueada para conta suspensa: ${email}`);
+    return res.status(403).json({ error: 'Sua conta foi suspensa por um administrador.' });
+  }
+
   const token = createSession(user.id);
+  addLog(user.id, 'login', `Usuário efetuou login: ${user.name} (${user.email})`);
   res.json({ token, user });
 });
 
@@ -283,6 +298,8 @@ app.post('/api/upload', authenticate, (req, res) => {
         status: task.status,
         progress: task.progress
       });
+
+      addLog(req.user.id, 'upload', `Upload de vídeo realizado: ${file.originalname} (${(file.size / (1024 * 1024)).toFixed(2)} MB)`);
     });
 
     res.json({ tasks: newTasks });
@@ -346,6 +363,8 @@ app.post('/api/process', authenticate, async (req, res) => {
     task.status = 'processing';
     task.progress = 0;
     task.errorMsg = null;
+    
+    addLog(req.user.id, 'processing_start', `Iniciou o processamento do vídeo: ${task.originalName} (${preset === 'shorts' ? 'Shorts' : 'Reels'})`);
 
     try {
       const result = await processVideo({
@@ -370,10 +389,13 @@ app.post('/api/process', authenticate, async (req, res) => {
         result.duration || 10
       );
 
+      addLog(req.user.id, 'processing_success', `Processamento concluído com sucesso: ${task.originalName} (${Math.round(result.duration || 10)}s)`);
+
     } catch (err) {
       task.status = 'error';
       task.errorMsg = err.message || 'Erro inesperado durante a edição';
       console.error(`Erro ao processar tarefa ${task.id}:`, err);
+      addLog(req.user.id, 'processing_error', `Erro ao processar vídeo ${task.originalName}: ${err.message}`);
     }
   });
 });
@@ -405,6 +427,8 @@ app.get('/api/download-all', authenticate, (req, res) => {
 
   const zipBuffer = zip.toBuffer();
   
+  addLog(req.user.id, 'download_all', `Usuário baixou pacote ZIP de vídeos contendo ${filesAdded} arquivos`);
+
   res.setHeader('Content-Type', 'application/zip');
   res.setHeader('Content-Disposition', 'attachment; filename="videos_editados.zip"');
   res.send(zipBuffer);
@@ -418,6 +442,9 @@ app.get('/api/download/:id', authenticate, (req, res) => {
   }
   const baseName = path.basename(task.originalName, path.extname(task.originalName));
   const cleanName = `${baseName}_editado.mp4`;
+  
+  addLog(req.user.id, 'download', `Usuário baixou vídeo editado: ${task.originalName}`);
+  
   res.download(task.outputPath, cleanName);
 });
 
@@ -455,6 +482,175 @@ app.get('/api/assets', (req, res) => {
     res.json({ photos, videos });
   } catch (error) {
     res.status(500).json({ error: 'Falha ao buscar assets' });
+  }
+});
+
+// Middleware de verificação de administrador
+const requireAdmin = (req, res, next) => {
+  if (!req.user || req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Acesso restrito a administradores.' });
+  }
+  next();
+};
+
+// Endpoints administrativos protegidos
+app.get('/api/admin/stats', authenticate, requireAdmin, (req, res) => {
+  try {
+    const users = getAllUsers();
+    const totalUsers = users.length;
+    
+    // Contar usuários ativos (com sessões ativas)
+    const db = JSON.parse(fs.readFileSync(path.join(__dirname, 'db.json'), 'utf-8'));
+    const activeSessionsCount = Object.keys(db.sessions || {}).length;
+    
+    // Novos cadastros hoje, esta semana e este mês
+    const now = new Date();
+    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const startOfWeek = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    
+    let createdToday = 0;
+    let createdThisWeek = 0;
+    let createdThisMonth = 0;
+    
+    users.forEach(u => {
+      const dt = new Date(u.createdAt);
+      if (dt >= startOfToday) createdToday++;
+      if (dt >= startOfWeek) createdThisWeek++;
+      if (dt >= startOfMonth) createdThisMonth++;
+    });
+    
+    const freeCount = users.filter(u => u.plan === 'Free').length;
+    const proCount = users.filter(u => u.plan === 'Pro').length;
+    const businessCount = users.filter(u => u.plan === 'Business').length;
+    
+    // Total de vídeos processados e uploads
+    const totalProcessed = db.history ? db.history.length : 0;
+    
+    // Cálculo do tamanho dos diretórios físicos
+    const getDirSize = (dirPath) => {
+      let size = 0;
+      if (fs.existsSync(dirPath)) {
+        const files = fs.readdirSync(dirPath);
+        files.forEach(f => {
+          const stats = fs.statSync(path.join(dirPath, f));
+          if (stats.isFile()) size += stats.size;
+        });
+      }
+      return size;
+    };
+    
+    const uploadsSize = getDirSize(UPLOADS_DIR);
+    const outputsSize = getDirSize(OUTPUTS_DIR);
+    const totalDiskUsedGB = parseFloat(((uploadsSize + outputsSize) / (1024 * 1024 * 1024)).toFixed(3));
+    
+    // Downloads e processamentos simulados/reais
+    const logs = db.logs || [];
+    const downloadsCount = logs.filter(l => l.action === 'download' || l.action === 'download_all').length;
+    const totalUploadsCount = logs.filter(l => l.action === 'upload').length;
+    
+    res.json({
+      totalUsers,
+      activeUsers: activeSessionsCount,
+      createdToday,
+      createdThisWeek,
+      createdThisMonth,
+      freeCount,
+      proCount,
+      businessCount,
+      totalProcessed,
+      totalUploads: totalUploadsCount || totalProcessed,
+      totalDownloads: downloadsCount,
+      totalDiskUsedGB,
+      avgStorageUsedPerUserGB: totalUsers > 0 ? parseFloat((totalDiskUsedGB / totalUsers).toFixed(3)) : 0,
+      systemStatus: 'online'
+    });
+  } catch (error) {
+    console.error('Erro ao buscar estatísticas do admin:', error);
+    res.status(500).json({ error: 'Erro interno do servidor ao gerar estatísticas' });
+  }
+});
+
+app.get('/api/admin/users', authenticate, requireAdmin, (req, res) => {
+  try {
+    const users = getAllUsers();
+    res.json({ users });
+  } catch (error) {
+    res.status(500).json({ error: 'Erro ao listar usuários' });
+  }
+});
+
+app.post('/api/admin/users/:id/plan', authenticate, requireAdmin, (req, res) => {
+  const { plan } = req.body;
+  if (!plan) return res.status(400).json({ error: 'Plano não fornecido.' });
+  
+  try {
+    const updated = upgradeUserPlan(req.params.id, plan);
+    if (!updated) return res.status(404).json({ error: 'Usuário não encontrado.' });
+    
+    addLog(req.user.id, 'admin_change_plan', `Admin alterou plano do usuário ${updated.email} para ${plan}`);
+    res.json({ user: updated });
+  } catch (error) {
+    res.status(500).json({ error: 'Erro ao alterar plano do usuário.' });
+  }
+});
+
+app.post('/api/admin/users/:id/status', authenticate, requireAdmin, (req, res) => {
+  const { status } = req.body;
+  if (!status || !['active', 'suspended'].includes(status)) {
+    return res.status(400).json({ error: 'Status inválido.' });
+  }
+  
+  try {
+    const updated = updateUserStatus(req.params.id, status);
+    if (!updated) return res.status(404).json({ error: 'Usuário não encontrado.' });
+    
+    addLog(req.user.id, `admin_${status}`, `Admin alterou status do usuário ${updated.email} para ${status}`);
+    res.json({ user: updated });
+  } catch (error) {
+    res.status(500).json({ error: 'Erro ao alterar status do usuário.' });
+  }
+});
+
+app.delete('/api/admin/users/:id', authenticate, requireAdmin, (req, res) => {
+  try {
+    const db = JSON.parse(fs.readFileSync(path.join(__dirname, 'db.json'), 'utf-8'));
+    const targetUser = db.users.find(u => u.id === req.params.id);
+    if (!targetUser) return res.status(404).json({ error: 'Usuário não encontrado.' });
+    
+    deleteUser(req.params.id);
+    addLog(req.user.id, 'admin_delete_user', `Admin excluiu o usuário permanentemente: ${targetUser.email}`);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: 'Erro ao excluir usuário.' });
+  }
+});
+
+app.get('/api/admin/logs', authenticate, requireAdmin, (req, res) => {
+  try {
+    const logs = getLogs();
+    res.json({ logs });
+  } catch (error) {
+    res.status(500).json({ error: 'Erro ao buscar logs' });
+  }
+});
+
+app.get('/api/admin/settings', authenticate, requireAdmin, (req, res) => {
+  try {
+    const settings = getSettings();
+    res.json({ settings });
+  } catch (error) {
+    res.status(500).json({ error: 'Erro ao buscar configurações' });
+  }
+});
+
+app.post('/api/admin/settings', authenticate, requireAdmin, (req, res) => {
+  try {
+    const settings = updateSettings(req.body);
+    addLog(req.user.id, 'admin_update_settings', 'Admin atualizou as configurações de limites da plataforma');
+    res.json({ settings });
+  } catch (error) {
+    res.status(500).json({ error: 'Erro ao salvar configurações' });
   }
 });
 

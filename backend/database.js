@@ -67,6 +67,7 @@ export function createUser(email, password, name) {
   ];
   const avatarColor = gradients[Math.floor(Math.random() * gradients.length)];
 
+  const isFirstUser = db.users.length === 0;
   const newUser = {
     id: crypto.randomUUID(),
     email: normalizedEmail,
@@ -74,6 +75,8 @@ export function createUser(email, password, name) {
     passwordHash,
     salt,
     plan: 'Free',
+    role: isFirstUser ? 'admin' : 'user',
+    status: 'active',
     avatarInitials,
     avatarColor,
     createdAt: new Date().toISOString()
@@ -193,4 +196,99 @@ export function getUserHistory(userId) {
   return db.history
     .filter(h => h.userId === userId)
     .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+}
+
+// Adicionar log ao sistema
+export function addLog(userId, action, details) {
+  const db = readDb();
+  if (!db.logs) db.logs = [];
+  
+  // Limitar logs a 500 registros para evitar consumo de disco excessivo
+  if (db.logs.length > 500) {
+    db.logs.shift();
+  }
+
+  const user = userId ? db.users.find(u => u.id === userId) : null;
+  const logEntry = {
+    id: crypto.randomUUID(),
+    userId: userId || null,
+    email: user ? user.email : (userId ? 'Desconhecido' : 'Sistema'),
+    action,
+    details,
+    createdAt: new Date().toISOString()
+  };
+  
+  db.logs.push(logEntry);
+  writeDb(db);
+  return logEntry;
+}
+
+// Obter todos os usuários para administração
+export function getAllUsers() {
+  const db = readDb();
+  return db.users.map(u => {
+    const userHistory = db.history.filter(h => h.userId === u.id);
+    const totalSize = userHistory.reduce((sum, h) => sum + (h.size || 0), 0);
+    const { passwordHash: _, salt: __, ...userResponse } = u;
+    return {
+      ...userResponse,
+      historyCount: userHistory.length,
+      storageUsedGB: parseFloat((totalSize / (1024 * 1024 * 1024)).toFixed(3))
+    };
+  });
+}
+
+// Atualizar status do usuário (ativar/suspender)
+export function updateUserStatus(userId, status) {
+  const db = readDb();
+  const user = db.users.find(u => u.id === userId);
+  if (!user) return null;
+  user.status = status;
+  writeDb(db);
+  return user;
+}
+
+// Excluir usuário
+export function deleteUser(userId) {
+  const db = readDb();
+  db.users = db.users.filter(u => u.id !== userId);
+  db.history = db.history.filter(h => h.userId !== userId);
+  // Limpar sessões
+  Object.keys(db.sessions).forEach(token => {
+    if (db.sessions[token].userId === userId) {
+      delete db.sessions[token];
+    }
+  });
+  writeDb(db);
+  return true;
+}
+
+// Obter logs
+export function getLogs() {
+  const db = readDb();
+  return (db.logs || []).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+}
+
+// Configurações globais
+export function getSettings() {
+  const db = readDb();
+  if (!db.settings) {
+    db.settings = {
+      freeLimit: 10,
+      proLimit: 100,
+      maxFileSizeMB: 150
+    };
+    writeDb(db);
+  }
+  return db.settings;
+}
+
+export function updateSettings(newSettings) {
+  const db = readDb();
+  db.settings = {
+    ...db.settings,
+    ...newSettings
+  };
+  writeDb(db);
+  return db.settings;
 }

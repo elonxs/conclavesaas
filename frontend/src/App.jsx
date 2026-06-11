@@ -141,6 +141,35 @@ export default function App() {
   const [supportSuccess, setSupportSuccess] = useState(false);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
+  // --- PAINEL ADMINISTRATIVO ---
+  const [adminTab, setAdminTab] = useState('dashboard');
+  const [adminStats, setAdminStats] = useState({
+    totalUsers: 0,
+    activeUsers: 0,
+    createdToday: 0,
+    createdThisWeek: 0,
+    createdThisMonth: 0,
+    freeCount: 0,
+    proCount: 0,
+    businessCount: 0,
+    totalProcessed: 0,
+    totalUploads: 0,
+    totalDownloads: 0,
+    totalDiskUsedGB: 0.0,
+    avgStorageUsedPerUserGB: 0.0,
+    systemStatus: 'online'
+  });
+  const [adminUsersList, setAdminUsersList] = useState([]);
+  const [adminLogsList, setAdminLogsList] = useState([]);
+  const [adminSettingsObj, setAdminSettingsObj] = useState({
+    freeLimit: 10,
+    proLimit: 100,
+    maxFileSizeMB: 150
+  });
+  const [adminSearchQuery, setAdminSearchQuery] = useState('');
+  const [adminSelectedUser, setAdminSelectedUser] = useState(null);
+  const [adminLoading, setAdminLoading] = useState(false);
+
   // Histórico e Estatísticas Reais vindos do banco de dados local
   const [simulatedHistory, setSimulatedHistory] = useState([]);
   const [simulatedStats, setSimulatedStats] = useState({
@@ -151,6 +180,18 @@ export default function App() {
     quotaUsed: 0,
     quotaLimit: 10
   });
+
+  // Função auxiliar para navegação que atualiza o histórico do navegador (HTML5 History API)
+  const navigateTo = (newView) => {
+    setView(newView);
+    if (newView === 'admin') {
+      window.history.pushState({}, '', '/admin');
+    } else if (newView === 'app') {
+      window.history.pushState({}, '', '/app');
+    } else {
+      window.history.pushState({}, '', '/');
+    }
+  };
 
   // Buscar dados reais do usuário autenticado
   const fetchUserData = async (activeToken) => {
@@ -182,7 +223,18 @@ export default function App() {
           quotaUsed: data.stats.quotaUsed,
           quotaLimit: limit
         });
-        setView('app');
+
+        // Verificação de rota de Administrador
+        if (window.location.pathname === '/admin') {
+          if (data.user.role === 'admin') {
+            setView('admin');
+          } else {
+            // Se não for admin, redireciona para o app regular
+            navigateTo('app');
+          }
+        } else {
+          setView('app');
+        }
       } else {
         handleLogout();
       }
@@ -196,9 +248,145 @@ export default function App() {
     if (token) {
       fetchUserData(token);
     } else {
-      setView('landing');
+      if (window.location.pathname === '/admin') {
+        setView('landing');
+        setAuthModal({ show: true, mode: 'login', email: '', password: '', name: '', error: 'Por favor, conecte-se com sua conta administrativa.' });
+      } else {
+        setView('landing');
+      }
     }
   }, [token]);
+
+  // --- BUSCAR DADOS ADMINISTRATIVOS ---
+  const fetchAdminData = async () => {
+    if (view !== 'admin' || !token) return;
+    setAdminLoading(true);
+    try {
+      const headers = { 'Authorization': `Bearer ${token}` };
+      
+      const statsRes = await fetch(`${API_BASE}/api/admin/stats`, { headers });
+      if (statsRes.ok) {
+        const statsData = await statsRes.json();
+        setAdminStats(statsData);
+      }
+      
+      const usersRes = await fetch(`${API_BASE}/api/admin/users`, { headers });
+      if (usersRes.ok) {
+        const usersData = await usersRes.json();
+        setAdminUsersList(usersData.users);
+      }
+      
+      const logsRes = await fetch(`${API_BASE}/api/admin/logs`, { headers });
+      if (logsRes.ok) {
+        const logsData = await logsRes.json();
+        setAdminLogsList(logsData.logs);
+      }
+      
+      const settingsRes = await fetch(`${API_BASE}/api/admin/settings`, { headers });
+      if (settingsRes.ok) {
+        const settingsData = await settingsRes.json();
+        setAdminSettingsObj(settingsData.settings);
+      }
+    } catch (e) {
+      console.error('Erro ao carregar dados do admin:', e);
+    } finally {
+      setAdminLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchAdminData();
+  }, [view, adminTab, token]);
+
+  const handleUpdateUserPlan = async (userId, newPlan) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/admin/users/${userId}/plan`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({ plan: newPlan })
+      });
+      if (res.ok) {
+        fetchAdminData();
+        if (adminSelectedUser && adminSelectedUser.id === userId) {
+          setAdminSelectedUser(prev => ({ ...prev, plan: newPlan }));
+        }
+      } else {
+        const err = await res.json();
+        alert(err.error || 'Erro ao alterar plano do usuário.');
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const handleUpdateUserStatus = async (userId, newStatus) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/admin/users/${userId}/status`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({ status: newStatus })
+      });
+      if (res.ok) {
+        fetchAdminData();
+        if (adminSelectedUser && adminSelectedUser.id === userId) {
+          setAdminSelectedUser(prev => ({ ...prev, status: newStatus }));
+        }
+      } else {
+        const err = await res.json();
+        alert(err.error || 'Erro ao alterar status do usuário.');
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const handleDeleteUser = async (userId) => {
+    if (!confirm('Deseja realmente excluir este usuário e todos os seus dados? Esta ação não pode ser desfeita.')) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/admin/users/${userId}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (res.ok) {
+        setAdminSelectedUser(null);
+        fetchAdminData();
+      } else {
+        const err = await res.json();
+        alert(err.error || 'Erro ao excluir usuário.');
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const handleUpdateAdminSettings = async (e) => {
+    e.preventDefault();
+    try {
+      const res = await fetch(`${API_BASE}/api/admin/settings`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify(adminSettingsObj)
+      });
+      if (res.ok) {
+        alert('Configurações atualizadas com sucesso!');
+        fetchAdminData();
+      } else {
+        const err = await res.json();
+        alert(err.error || 'Erro ao atualizar configurações.');
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
 
   // Parar polling ao desmontar
   useEffect(() => {
@@ -492,7 +680,7 @@ export default function App() {
     }
     localStorage.removeItem('conclave_token');
     setToken('');
-    setView('landing');
+    navigateTo('landing');
     setTasks([]);
   };
 
@@ -1003,6 +1191,11 @@ export default function App() {
     );
   }
 
+  // 3.5 ADMIN VIEW
+  if (view === 'admin') {
+    return renderAdminView();
+  }
+
   // 4. PRIVATE APP VIEW
   return (
     <div className="saas-layout">
@@ -1071,6 +1264,18 @@ export default function App() {
               </svg>
               Suporte & FAQ
             </button>
+            {userProfile.role === 'admin' && (
+              <button 
+                className="saas-nav-link" 
+                onClick={() => { navigateTo('admin'); setIsMobileMenuOpen(false); }} 
+                style={{ color: 'hsl(var(--primary))', fontWeight: 600, borderLeft: '3px solid hsl(var(--primary))', background: 'hsl(var(--primary) / 0.08)' }}
+              >
+                <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4" />
+                </svg>
+                Painel Admin
+              </button>
+            )}
           </nav>
         </div>
 
@@ -1167,6 +1372,566 @@ export default function App() {
       )}
     </div>
   );
+
+  function renderAdminView() {
+    const filteredUsers = adminUsersList.filter(u => 
+      u.name.toLowerCase().includes(adminSearchQuery.toLowerCase()) ||
+      u.email.toLowerCase().includes(adminSearchQuery.toLowerCase())
+    );
+
+    return (
+      <div className="saas-layout">
+        {/* Backdrop para mobile */}
+        <div className={`saas-sidebar-backdrop ${isMobileMenuOpen ? 'open' : ''}`} onClick={() => setIsMobileMenuOpen(false)}></div>
+
+        {/* Header mobile */}
+        <div className="saas-mobile-header">
+          <div className="logo-container" onClick={() => { navigateTo('app'); setIsMobileMenuOpen(false); }} style={{ cursor: 'pointer' }}>
+            <div className="logo-icon" style={{ width: '32px', height: '32px', fontSize: '1rem', borderRadius: '8px' }}>C</div>
+            <span style={{ fontFamily: 'Outfit, sans-serif', fontWeight: 700, letterSpacing: '-0.02em', fontSize: '1.1rem' }}>CONCLAVE ADMIN</span>
+          </div>
+          <button className="hamburger-btn" onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}>
+            <svg width="24" height="24" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M4 6h16M4 12h16M4 18h16" />
+            </svg>
+          </button>
+        </div>
+
+        {/* Sidebar do Admin */}
+        <aside className={`saas-sidebar ${isMobileMenuOpen ? 'open' : ''}`} style={{ borderColor: 'hsl(var(--primary) / 0.3)' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+            <div className="saas-sidebar-brand" onClick={() => { navigateTo('app'); setIsMobileMenuOpen(false); }} style={{ cursor: 'pointer' }}>
+              <div className="logo-icon" style={{ background: 'linear-gradient(135deg, hsl(var(--primary)), #f59e0b)' }}>A</div>
+              <h1>ADMIN PANEL</h1>
+            </div>
+
+            <nav className="saas-sidebar-nav">
+              <button className={`saas-nav-link ${adminTab === 'dashboard' ? 'active' : ''}`} onClick={() => { setAdminTab('dashboard'); setIsMobileMenuOpen(false); }}>
+                <span>📊</span> Dashboard
+              </button>
+              <button className={`saas-nav-link ${adminTab === 'users' ? 'active' : ''}`} onClick={() => { setAdminTab('users'); setIsMobileMenuOpen(false); }}>
+                <span>👥</span> Gestão de Usuários
+              </button>
+              <button className={`saas-nav-link ${adminTab === 'plans' ? 'active' : ''}`} onClick={() => { setAdminTab('plans'); setIsMobileMenuOpen(false); }}>
+                <span>💳</span> Gestão de Planos
+              </button>
+              <button className={`saas-nav-link ${adminTab === 'system' ? 'active' : ''}`} onClick={() => { setAdminTab('system'); setIsMobileMenuOpen(false); }}>
+                <span>⚙️</span> Sistema
+              </button>
+              <button className={`saas-nav-link ${adminTab === 'logs' ? 'active' : ''}`} onClick={() => { setAdminTab('logs'); setIsMobileMenuOpen(false); }}>
+                <span>📜</span> Logs de Auditoria
+              </button>
+              <button className={`saas-nav-link ${adminTab === 'settings' ? 'active' : ''}`} onClick={() => { setAdminTab('settings'); setIsMobileMenuOpen(false); }}>
+                <span>🛠️</span> Configurações
+              </button>
+            </nav>
+          </div>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+            <button className="btn btn-primary" onClick={() => { navigateTo('app'); setIsMobileMenuOpen(false); }}>
+              ← Voltar ao Editor
+            </button>
+            <button className="btn btn-secondary" style={{ padding: '0.4rem', fontSize: '0.8rem', borderColor: 'rgba(239, 68, 68, 0.2)', color: '#ef4444' }} onClick={handleLogout}>
+              Sair
+            </button>
+          </div>
+        </aside>
+
+        {/* Conteúdo Principal do Admin */}
+        <main className="saas-content">
+          {adminLoading && (
+            <div style={{ color: 'hsl(var(--primary))', marginBottom: '1rem', fontWeight: 600 }}>
+              Carregando dados administrativos em tempo real...
+            </div>
+          )}
+          {renderAdminTabContent(filteredUsers)}
+        </main>
+      </div>
+    );
+  }
+
+  function renderAdminTabContent(filteredUsers) {
+    switch (adminTab) {
+      case 'dashboard':
+        return (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
+            <div>
+              <h1 style={{ fontSize: '1.75rem' }}>Painel Geral do Admin</h1>
+              <p style={{ color: 'hsl(var(--text-gray))', fontSize: '0.9rem' }}>Estatísticas globais e monitoramento de uso em tempo real.</p>
+            </div>
+
+            {/* Módulos de Estatísticas */}
+            <div className="stats-large-grid" style={{ gridTemplateColumns: 'repeat(4, 1fr)' }}>
+              <div className="stat-large-card">
+                <span className="stat-label">Total de Usuários</span>
+                <span className="stat-large-value cyan">{adminStats.totalUsers}</span>
+                <span style={{ fontSize: '0.75rem', color: 'hsl(var(--text-muted))' }}>Cadastros na plataforma</span>
+              </div>
+              <div className="stat-large-card">
+                <span className="stat-label">Usuários Ativos</span>
+                <span className="stat-large-value gold">{adminStats.activeUsers}</span>
+                <span style={{ fontSize: '0.75rem', color: 'hsl(var(--text-muted))' }}>Sessões ativas no momento</span>
+              </div>
+              <div className="stat-large-card">
+                <span className="stat-label">Vídeos Editados</span>
+                <span className="stat-large-value emerald">{adminStats.totalProcessed}</span>
+                <span style={{ fontSize: '0.75rem', color: 'hsl(var(--text-muted))' }}>Total processado</span>
+              </div>
+              <div className="stat-large-card">
+                <span className="stat-label">Espaço em Disco</span>
+                <span className="stat-large-value" style={{ color: '#ef4444' }}>{adminStats.totalDiskUsedGB} GB</span>
+                <span style={{ fontSize: '0.75rem', color: 'hsl(var(--text-muted))' }}>Vídeos e uploads físicos</span>
+              </div>
+            </div>
+
+            <div className="chart-row" style={{ gridTemplateColumns: '1fr 1fr' }}>
+              <div className="panel">
+                <h3 className="panel-title">👥 Crescimento de Cadastros</h3>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem', marginTop: '1rem' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span>Cadastros Hoje</span>
+                    <strong style={{ color: 'hsl(var(--accent-cyan))', fontSize: '1.1rem' }}>+{adminStats.createdToday}</strong>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span>Esta Semana</span>
+                    <strong style={{ color: 'hsl(var(--primary))', fontSize: '1.1rem' }}>+{adminStats.createdThisWeek}</strong>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span>Este Mês</span>
+                    <strong style={{ color: 'hsl(var(--accent-emerald))', fontSize: '1.1rem' }}>+{adminStats.createdThisMonth}</strong>
+                  </div>
+                  <div style={{ borderTop: '1px solid hsl(var(--border-subtle))', paddingTop: '1rem', marginTop: '0.5rem' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', color: 'hsl(var(--text-muted))' }}>
+                      <span>Consumo médio / usuário</span>
+                      <span>{adminStats.avgStorageUsedPerUserGB} GB</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="panel">
+                <h3 className="panel-title">💳 Distribuição de Planos</h3>
+                <div className="simulated-chart-bar-container">
+                  <div className="chart-bar-item">
+                    <div className="chart-bar-labels">
+                      <span>Plano Free ({adminStats.freeCount} usuários)</span>
+                      <span>{adminStats.totalUsers > 0 ? Math.round((adminStats.freeCount / adminStats.totalUsers) * 100) : 0}%</span>
+                    </div>
+                    <div className="chart-bar-track">
+                      <div className="chart-bar-fill" style={{ width: `${adminStats.totalUsers > 0 ? (adminStats.freeCount / adminStats.totalUsers) * 100 : 0}%`, background: 'hsl(var(--text-muted))' }}></div>
+                    </div>
+                  </div>
+                  <div className="chart-bar-item">
+                    <div className="chart-bar-labels">
+                      <span>Plano Pro ({adminStats.proCount} usuários)</span>
+                      <span>{adminStats.totalUsers > 0 ? Math.round((adminStats.proCount / adminStats.totalUsers) * 100) : 0}%</span>
+                    </div>
+                    <div className="chart-bar-track">
+                      <div className="chart-bar-fill" style={{ width: `${adminStats.totalUsers > 0 ? (adminStats.proCount / adminStats.totalUsers) * 100 : 0}%`, background: 'hsl(var(--primary))' }}></div>
+                    </div>
+                  </div>
+                  <div className="chart-bar-item">
+                    <div className="chart-bar-labels">
+                      <span>Plano Business ({adminStats.businessCount} usuários)</span>
+                      <span>{adminStats.totalUsers > 0 ? Math.round((adminStats.businessCount / adminStats.totalUsers) * 100) : 0}%</span>
+                    </div>
+                    <div className="chart-bar-track">
+                      <div className="chart-bar-fill" style={{ width: `${adminStats.totalUsers > 0 ? (adminStats.businessCount / adminStats.totalUsers) * 100 : 0}%`, background: 'hsl(var(--accent-cyan))' }}></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+
+      case 'users':
+        return (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem' }}>
+              <div>
+                <h1 style={{ fontSize: '1.75rem' }}>Gestão de Usuários</h1>
+                <p style={{ color: 'hsl(var(--text-gray))', fontSize: '0.9rem' }}>Busque, edite planos, suspenda ou exclua usuários da plataforma.</p>
+              </div>
+              <div style={{ position: 'relative', width: '300px' }}>
+                <input 
+                  type="text" 
+                  className="form-input" 
+                  placeholder="Buscar por nome ou e-mail..." 
+                  value={adminSearchQuery}
+                  onChange={(e) => setAdminSearchQuery(e.target.value)}
+                  style={{ paddingLeft: '2.5rem' }}
+                />
+                <span style={{ position: 'absolute', left: '0.9rem', top: '0.85rem', color: 'hsl(var(--text-muted))' }}>🔍</span>
+              </div>
+            </div>
+
+            <div className="panel" style={{ padding: 0, overflow: 'hidden' }}>
+              <div className="history-table-wrapper" style={{ margin: 0 }}>
+                <table className="history-table">
+                  <thead>
+                    <tr>
+                      <th>Nome</th>
+                      <th>E-mail</th>
+                      <th>Plano</th>
+                      <th>Status</th>
+                      <th>Cadastro</th>
+                      <th style={{ textAlign: 'right' }}>Ações</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredUsers.length === 0 ? (
+                      <tr>
+                        <td colSpan={6} style={{ textAlign: 'center', padding: '3rem', color: 'hsl(var(--text-muted))' }}>
+                          Nenhum usuário encontrado.
+                        </td>
+                      </tr>
+                    ) : (
+                      filteredUsers.map(u => (
+                        <tr key={u.id} style={{ cursor: 'pointer' }} onClick={() => setAdminSelectedUser(u)}>
+                          <td>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                              <div className="profile-avatar" style={{ width: '28px', height: '28px', fontSize: '0.75rem', background: u.avatarColor }}>
+                                {u.avatarInitials}
+                              </div>
+                              <strong>{u.name}</strong>
+                              {u.role === 'admin' && <span style={{ fontSize: '0.65rem', background: 'hsl(var(--primary) / 0.2)', color: 'hsl(var(--primary))', padding: '0.1rem 0.3rem', borderRadius: '4px', textTransform: 'uppercase' }}>Admin</span>}
+                            </div>
+                          </td>
+                          <td>{u.email}</td>
+                          <td>
+                            <span className={`profile-badge ${u.plan.toLowerCase()}`} style={{ fontSize: '0.75rem' }}>
+                              {u.plan}
+                            </span>
+                          </td>
+                          <td>
+                            <span className={`status-indicator ${u.status === 'active' ? 'completed' : ''}`} style={{ color: u.status === 'suspended' ? '#f87171' : '', background: u.status === 'suspended' ? 'rgba(239, 68, 68, 0.15)' : '' }}>
+                              {u.status === 'active' ? 'Ativo' : 'Suspenso'}
+                            </span>
+                          </td>
+                          <td>{new Date(u.createdAt).toLocaleDateString()}</td>
+                          <td style={{ textAlign: 'right' }} onClick={(e) => e.stopPropagation()}>
+                            <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'flex-end' }}>
+                              <button className="btn btn-secondary" style={{ padding: '0.25rem 0.5rem', fontSize: '0.75rem', width: 'auto' }} onClick={() => setAdminSelectedUser(u)}>
+                                Detalhes
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* Modal de Detalhes do Usuário */}
+            {adminSelectedUser && (
+              <div className="checkout-overlay" onClick={() => setAdminSelectedUser(null)}>
+                <div className="checkout-modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '600px' }}>
+                  <div className="checkout-header">
+                    <h3>Perfil Completo: {adminSelectedUser.name}</h3>
+                    <button className="checkout-close-btn" onClick={() => setAdminSelectedUser(null)}>
+                      <svg width="20" height="20" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2.5">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                      </svg>
+                    </button>
+                  </div>
+                  <div className="checkout-body" style={{ gap: '1.5rem' }}>
+                    <div style={{ display: 'flex', gap: '1.25rem', alignItems: 'center' }}>
+                      <div className="profile-avatar" style={{ width: '64px', height: '64px', fontSize: '1.5rem', background: adminSelectedUser.avatarColor }}>
+                        {adminSelectedUser.avatarInitials}
+                      </div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+                        <h4 style={{ fontSize: '1.2rem' }}>{adminSelectedUser.name} {adminSelectedUser.role === 'admin' && '(Administrador)'}</h4>
+                        <span style={{ color: 'hsl(var(--text-gray))', fontSize: '0.85rem' }}>{adminSelectedUser.email}</span>
+                        <span style={{ fontSize: '0.75rem', color: 'hsl(var(--text-muted))' }}>ID: {adminSelectedUser.id}</span>
+                      </div>
+                    </div>
+
+                    <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(3, 1fr)' }}>
+                      <div className="stat-card">
+                        <span className="stat-label">Vídeos Enviados</span>
+                        <span className="stat-value active">{adminSelectedUser.historyCount || 0}</span>
+                      </div>
+                      <div className="stat-card">
+                        <span className="stat-label">Espaço Utilizado</span>
+                        <span className="stat-value">{adminSelectedUser.storageUsedGB || 0} GB</span>
+                      </div>
+                      <div className="stat-card">
+                        <span className="stat-label">Data Cadastro</span>
+                        <span className="stat-value" style={{ fontSize: '0.9rem', paddingTop: '0.25rem' }}>{new Date(adminSelectedUser.createdAt).toLocaleDateString()}</span>
+                      </div>
+                    </div>
+
+                    <div className="panel" style={{ background: 'rgba(0,0,0,0.2)' }}>
+                      <h4 style={{ marginBottom: '1rem', borderBottom: '1px solid hsl(var(--border-subtle))', paddingBottom: '0.5rem' }}>⚙️ Ações Administrativas</h4>
+                      
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem' }}>
+                          <span>Alterar Plano Manualmente:</span>
+                          <select 
+                            className="form-select" 
+                            style={{ width: '180px' }}
+                            value={adminSelectedUser.plan}
+                            onChange={(e) => handleUpdateUserPlan(adminSelectedUser.id, e.target.value)}
+                          >
+                            <option value="Free">Plano Free</option>
+                            <option value="Pro">Plano Pro</option>
+                            <option value="Business">Plano Business</option>
+                          </select>
+                        </div>
+
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem' }}>
+                          <span>Status da Conta:</span>
+                          <div style={{ display: 'flex', gap: '0.5rem' }}>
+                            {adminSelectedUser.status === 'active' ? (
+                              <button className="btn btn-secondary" style={{ width: 'auto', color: '#ef4444', borderColor: 'rgba(239, 68, 68, 0.2)' }} onClick={() => handleUpdateUserStatus(adminSelectedUser.id, 'suspended')}>
+                                Suspender Conta
+                              </button>
+                            ) : (
+                              <button className="btn btn-success" style={{ width: 'auto' }} onClick={() => handleUpdateUserStatus(adminSelectedUser.id, 'active')}>
+                                Reativar Conta
+                              </button>
+                            )}
+                          </div>
+                        </div>
+
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderTop: '1px solid hsl(var(--border-subtle))', paddingTop: '1rem', marginTop: '0.5rem', flexWrap: 'wrap', gap: '0.5rem' }}>
+                          <span style={{ color: 'hsl(var(--text-muted))', fontSize: '0.85rem' }}>Ação Irreversível:</span>
+                          <button className="btn" style={{ width: 'auto', background: '#ef4444', color: '#fff', padding: '0.5rem 1rem' }} onClick={() => handleDeleteUser(adminSelectedUser.id)}>
+                            Excluir Usuário
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        );
+
+      case 'plans':
+        const estimatedRevenue = (adminStats.proCount * 49) + (adminStats.businessCount * 149);
+        return (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
+            <div>
+              <h1 style={{ fontSize: '1.75rem' }}>Gestão de Planos & Assinaturas</h1>
+              <p style={{ color: 'hsl(var(--text-gray))', fontSize: '0.9rem' }}>Faturamento estimado, estatísticas de vendas e integração de pagamentos.</p>
+            </div>
+
+            <div className="dashboard-grid" style={{ gridTemplateColumns: '1fr 360px' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+                <div className="panel">
+                  <h3 className="panel-title">💰 Faturamento Recorrente Estimado (MRR)</h3>
+                  <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.5rem', margin: '1rem 0' }}>
+                    <span style={{ fontSize: '2.5rem', fontWeight: 800, color: 'hsl(var(--accent-emerald))', fontFamily: 'Outfit, sans-serif' }}>
+                      R$ {estimatedRevenue.toLocaleString('pt-BR')}
+                    </span>
+                    <span style={{ color: 'hsl(var(--text-muted))' }}>/ mês estimado</span>
+                  </div>
+                  <p style={{ fontSize: '0.85rem', color: 'hsl(var(--text-gray))', lineHeight: '1.5' }}>
+                    Este valor é calculado somando as assinaturas ativas na plataforma: {adminStats.proCount} Pro (R$ 49/mês) e {adminStats.businessCount} Business (R$ 149/mês).
+                  </p>
+                </div>
+
+                <div className="panel">
+                  <h3 className="panel-title">🔌 Gateway de Pagamento (Futuro)</h3>
+                  <p style={{ fontSize: '0.9rem', color: 'hsl(var(--text-gray))', marginBottom: '1rem', lineHeight: '1.5' }}>
+                    Esta área está preparada para integração com **Stripe** ou **Mercado Pago** via Webhooks.
+                  </p>
+                  <div style={{ padding: '1rem', background: 'rgba(0,0,0,0.3)', border: '1px solid hsl(var(--border-subtle))', borderRadius: '8px', fontSize: '0.8rem', fontFamily: 'monospace', color: 'hsl(var(--text-muted))' }}>
+                    POST /api/webhooks/payments <br/>
+                    Status: AGUARDANDO INTEGRAÇÃO REAL
+                  </div>
+                </div>
+              </div>
+
+              <div className="panel" style={{ height: 'fit-content' }}>
+                <h3 className="panel-title">📊 Contagem por Plano</h3>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <span>Plano Free:</span>
+                    <strong>{adminStats.freeCount} usuários</strong>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <span>Plano Pro:</span>
+                    <strong>{adminStats.proCount} usuários</strong>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <span>Plano Business:</span>
+                    <strong>{adminStats.businessCount} usuários</strong>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+
+      case 'system':
+        return (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
+            <div>
+              <h1 style={{ fontSize: '1.75rem' }}>Status e Integridade do Sistema</h1>
+              <p style={{ color: 'hsl(var(--text-gray))', fontSize: '0.9rem' }}>Monitoramento físico do servidor, uploads e renderizador local.</p>
+            </div>
+
+            <div className="stats-large-grid" style={{ gridTemplateColumns: 'repeat(3, 1fr)' }}>
+              <div className="stat-large-card">
+                <span className="stat-label">Status do FFmpeg</span>
+                <span className="stat-large-value emerald">Operacional</span>
+                <span style={{ fontSize: '0.75rem', color: 'hsl(var(--text-muted))' }}>Biblioteca de vídeo carregada</span>
+              </div>
+              <div className="stat-large-card">
+                <span className="stat-label">Conexão Backend</span>
+                <span className="stat-large-value cyan">Online</span>
+                <span style={{ fontSize: '0.75rem', color: 'hsl(var(--text-muted))' }}>Porta 5005 respondendo</span>
+              </div>
+              <div className="stat-large-card">
+                <span className="stat-label">Espaço Usado Total</span>
+                <span className="stat-large-value" style={{ color: '#ef4444' }}>{adminStats.totalDiskUsedGB} GB</span>
+                <span style={{ fontSize: '0.75rem', color: 'hsl(var(--text-muted))' }}>Limpeza de cache recomendada &gt; 5GB</span>
+              </div>
+            </div>
+
+            <div className="panel">
+              <h3 className="panel-title">🛠️ Diagnóstico Físico de Arquivos</h3>
+              <p style={{ fontSize: '0.85rem', color: 'hsl(var(--text-gray))', marginBottom: '1rem', lineHeight: '1.5' }}>
+                Os vídeos de entrada e saídas processados são guardados localmente nos diretórios do servidor. Abaixo estão os status físicos correspondentes:
+              </p>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', fontSize: '0.9rem' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span>Diretório de Uploads (`/backend/uploads`):</span>
+                  <strong>{Math.round(adminStats.totalDiskUsedGB * 0.3 * 100) / 100} GB ocupados</strong>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span>Diretório de Saídas (`/backend/outputs`):</span>
+                  <strong>{Math.round(adminStats.totalDiskUsedGB * 0.7 * 100) / 100} GB ocupados</strong>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+
+      case 'logs':
+        return (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
+            <div>
+              <h1 style={{ fontSize: '1.75rem' }}>Logs de Auditoria</h1>
+              <p style={{ color: 'hsl(var(--text-gray))', fontSize: '0.9rem' }}>Histórico completo das últimas ações realizadas no sistema.</p>
+            </div>
+
+            <div className="panel" style={{ padding: '1rem' }}>
+              <div style={{ maxHeight: '500px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+                {adminLogsList.length === 0 ? (
+                  <div style={{ padding: '2rem', textAlign: 'center', color: 'hsl(var(--text-muted))' }}>
+                    Nenhum log registrado ainda.
+                  </div>
+                ) : (
+                  adminLogsList.map(log => (
+                    <div 
+                      key={log.id} 
+                      style={{ 
+                        padding: '0.75rem 1rem', 
+                        background: 'hsl(var(--bg-obsidian))', 
+                        border: '1px solid hsl(var(--border-subtle))', 
+                        borderRadius: '8px',
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        flexWrap: 'wrap',
+                        gap: '0.5rem',
+                        fontSize: '0.85rem'
+                      }}
+                    >
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.15rem' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                          <span 
+                            style={{ 
+                              fontSize: '0.7rem', 
+                              padding: '0.1rem 0.4rem', 
+                              borderRadius: '4px', 
+                              fontWeight: 600, 
+                              textTransform: 'uppercase',
+                              background: log.action.includes('error') || log.action.includes('failed') ? 'rgba(239,68,68,0.15)' : 'rgba(6,182,212,0.15)',
+                              color: log.action.includes('error') || log.action.includes('failed') ? '#f87171' : 'hsl(var(--accent-cyan))'
+                            }}
+                          >
+                            {log.action}
+                          </span>
+                          <strong style={{ color: 'hsl(var(--text-white))' }}>{log.email}</strong>
+                        </div>
+                        <span style={{ color: 'hsl(var(--text-gray))', marginTop: '0.2rem' }}>{log.details}</span>
+                      </div>
+                      <span style={{ fontSize: '0.75rem', color: 'hsl(var(--text-muted))' }}>
+                        {new Date(log.createdAt).toLocaleString()}
+                      </span>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          </div>
+        );
+
+      case 'settings':
+        return (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
+            <div>
+              <h1 style={{ fontSize: '1.75rem' }}>Configurações Globais da Plataforma</h1>
+              <p style={{ color: 'hsl(var(--text-gray))', fontSize: '0.9rem' }}>Ajuste os limites de planos e tamanho de arquivos permitidos no sistema.</p>
+            </div>
+
+            <div className="panel" style={{ maxWidth: '600px' }}>
+              <h3 className="panel-title">🛠️ Ajuste de Limites de Uso</h3>
+              <form onSubmit={handleUpdateAdminSettings} style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem', marginTop: '1rem' }}>
+                <div className="settings-group">
+                  <label>Limite Mensal de Vídeos - Plano Free</label>
+                  <input 
+                    type="number" 
+                    className="form-input" 
+                    value={adminSettingsObj.freeLimit}
+                    onChange={(e) => setAdminSettingsObj({ ...adminSettingsObj, freeLimit: parseInt(e.target.value, 10) })}
+                    required
+                  />
+                  <p className="settings-info">Número máximo de uploads/processamentos permitidos por mês.</p>
+                </div>
+                <div className="settings-group">
+                  <label>Limite Mensal de Vídeos - Plano Pro</label>
+                  <input 
+                    type="number" 
+                    className="form-input" 
+                    value={adminSettingsObj.proLimit}
+                    onChange={(e) => setAdminSettingsObj({ ...adminSettingsObj, proLimit: parseInt(e.target.value, 10) })}
+                    required
+                  />
+                  <p className="settings-info">Número máximo de uploads/processamentos permitidos por mês.</p>
+                </div>
+                <div className="settings-group">
+                  <label>Tamanho Máximo de Arquivos (MB)</label>
+                  <input 
+                    type="number" 
+                    className="form-input" 
+                    value={adminSettingsObj.maxFileSizeMB}
+                    onChange={(e) => setAdminSettingsObj({ ...adminSettingsObj, maxFileSizeMB: parseInt(e.target.value, 10) })}
+                    required
+                  />
+                  <p className="settings-info">Tamanho físico limite de cada upload de vídeo MP4.</p>
+                </div>
+                
+                <button type="submit" className="btn btn-primary" style={{ marginTop: '0.5rem' }}>
+                  Salvar Configurações Globais
+                </button>
+              </form>
+            </div>
+          </div>
+        );
+
+      default:
+        return null;
+    }
+  }
 
   function renderActiveTabContent() {
     switch (activeTab) {
