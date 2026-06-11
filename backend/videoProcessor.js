@@ -95,10 +95,10 @@ export async function processVideo(options, onProgress) {
     
     // Gerar fontes de áudio e vídeo dinamicamente dentro do complexFilter
     filterComplex += `color=c=black:s=1080x1920:r=30:d=${blackScreenDuration}[v2_scaled];`;
-    filterComplex += `anullsrc=channel_layout=stereo:sample_rate=44100:d=0.5[a1_silence];`;
-    filterComplex += `anullsrc=channel_layout=stereo:sample_rate=44100:d=${blackScreenDuration}[a2_silence];`;
+    filterComplex += `anullsrc=channel_layout=stereo:sample_rate=44100,atrim=end=0.5,asetpts=PTS-STARTPTS[a1_silence];`;
+    filterComplex += `anullsrc=channel_layout=stereo:sample_rate=44100,atrim=end=${blackScreenDuration},asetpts=PTS-STARTPTS[a2_silence];`;
     if (!hasAudio) {
-      filterComplex += `anullsrc=channel_layout=stereo:sample_rate=44100:d=${duration}[a0_silence];`;
+      filterComplex += `anullsrc=channel_layout=stereo:sample_rate=44100,atrim=end=${duration},asetpts=PTS-STARTPTS[a0_silence];`;
     }
     
     // Escalar inputs para garantir dimensões 1080x1920 exatamente
