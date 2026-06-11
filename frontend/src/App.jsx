@@ -87,15 +87,25 @@ function ConfettiEffect() {
 const API_BASE = import.meta.env.VITE_API_URL || '';
 
 export default function App() {
-  // --- NAVEGAÇÃO & USUÁRIO ---
+  // --- AUTENTICAÇÃO ---
+  const [token, setToken] = useState(localStorage.getItem('conclave_token') || '');
   const [view, setView] = useState('landing'); // 'landing' | 'app'
   const [activeTab, setActiveTab] = useState('editor'); // 'editor' | 'stats' | 'history' | 'billing' | 'settings' | 'support'
   const [plan, setPlan] = useState('Free'); // 'Free' | 'Pro' | 'Business'
   const [userProfile, setUserProfile] = useState({
-    name: 'Victor Dantas',
-    email: 'victor.dantas@creator.com',
-    avatarInitials: 'VD',
+    name: '',
+    email: '',
+    avatarInitials: '',
     avatarColor: 'linear-gradient(135deg, #F59E0B, #06B6D4)'
+  });
+  
+  const [authModal, setAuthModal] = useState({ 
+    show: false, 
+    mode: 'login', // 'login' | 'register'
+    email: '', 
+    password: '', 
+    name: '',
+    error: '' 
   });
 
   // --- EDITOR REAL ---
@@ -130,41 +140,64 @@ export default function App() {
   const [supportTicket, setSupportTicket] = useState({ subject: '', category: 'technical', message: '' });
   const [supportSuccess, setSupportSuccess] = useState(false);
 
-  // Histórico Simulado (Dados de exemplo)
-  const [simulatedHistory, setSimulatedHistory] = useState([
-    { id: 'h1', name: 'vlog_viagem_tokyo.mp4', size: '42.5 MB', date: '10/06/2026', preset: 'Reels (9:16)', status: 'completed' },
-    { id: 'h2', name: 'tutorial_coding_shorts.mp4', size: '18.2 MB', date: '09/06/2026', preset: 'Shorts (9:16)', status: 'completed' },
-    { id: 'h3', name: 'react_hooks_dicas.mp4', size: '29.7 MB', date: '08/06/2026', preset: 'Reels (9:16)', status: 'completed' },
-    { id: 'h4', name: 'podcast_cortes_05.mp4', size: '84.1 MB', date: '06/06/2026', preset: 'Shorts (9:16)', status: 'completed' }
-  ]);
-
-  // Estatísticas Simuladas
+  // Histórico e Estatísticas Reais vindos do banco de dados local
+  const [simulatedHistory, setSimulatedHistory] = useState([]);
   const [simulatedStats, setSimulatedStats] = useState({
-    totalVideos: 14,
-    timeSavedMinutes: 420,
-    storageUsedGB: 1.4,
+    totalVideos: 0,
+    timeSavedMinutes: 0,
+    storageUsedGB: 0,
     storageLimitGB: 10,
-    quotaUsed: 2,
+    quotaUsed: 0,
     quotaLimit: 10
   });
 
-  // Ajustar cotas fictícias de acordo com o plano
-  useEffect(() => {
-    let limit = 10;
-    let storage = 10;
-    if (plan === 'Pro') {
-      limit = 100;
-      storage = 100;
-    } else if (plan === 'Business') {
-      limit = 9999;
-      storage = 1000;
+  // Buscar dados reais do usuário autenticado
+  const fetchUserData = async (activeToken) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/auth/me`, {
+        headers: { 'Authorization': `Bearer ${activeToken}` }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setUserProfile(data.user);
+        setPlan(data.user.plan);
+        setSimulatedHistory(data.history);
+        
+        let limit = 10;
+        let storage = 10;
+        if (data.user.plan === 'Pro') {
+          limit = 100;
+          storage = 100;
+        } else if (data.user.plan === 'Business') {
+          limit = 9999;
+          storage = 1000;
+        }
+
+        setSimulatedStats({
+          totalVideos: data.stats.totalVideos,
+          timeSavedMinutes: data.stats.timeSavedMinutes,
+          storageUsedGB: data.stats.storageUsedGB,
+          storageLimitGB: storage,
+          quotaUsed: data.stats.quotaUsed,
+          quotaLimit: limit
+        });
+        setView('app');
+      } else {
+        handleLogout();
+      }
+    } catch (e) {
+      console.error('Erro ao carregar dados do usuário:', e);
     }
-    setSimulatedStats(prev => ({
-      ...prev,
-      quotaLimit: limit,
-      storageLimitGB: storage
-    }));
-  }, [plan]);
+  };
+
+  // Carregar sessão no mount
+  useEffect(() => {
+    if (token) {
+      fetchUserData(token);
+    } else {
+      setView('landing');
+    }
+  }, [token]);
 
   // Parar polling ao desmontar
   useEffect(() => {
@@ -186,13 +219,9 @@ export default function App() {
       setProcessing(false);
       if (prevProcessingRef.current && tasks.some(t => t.status === 'completed')) {
         setShowConfetti(true);
-        // Atualizar estatísticas simuladas
-        setSimulatedStats(prev => ({
-          ...prev,
-          totalVideos: prev.totalVideos + tasks.filter(t => t.status === 'completed').length,
-          quotaUsed: prev.quotaUsed + tasks.filter(t => t.status === 'completed').length,
-          timeSavedMinutes: prev.timeSavedMinutes + (tasks.filter(t => t.status === 'completed').length * 30)
-        }));
+        if (token) {
+          fetchUserData(token); // Atualizar histórico e estatísticas reais do banco local!
+        }
         setTimeout(() => setShowConfetti(false), 5000);
       }
       prevProcessingRef.current = false;
@@ -203,7 +232,9 @@ export default function App() {
     setProcessing(true);
     pollIntervalRef.current = setInterval(async () => {
       try {
-        const res = await fetch(`${API_BASE}/api/status`);
+        const res = await fetch(`${API_BASE}/api/status`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
         if (res.ok) {
           const data = await res.json();
           setTasks(prev => {
@@ -265,7 +296,7 @@ export default function App() {
       return;
     }
 
-    if (simulatedStats.quotaUsed + videoFiles.length > simulatedStats.quotaLimit) {
+    if (plan !== 'Business' && simulatedStats.quotaUsed + videoFiles.length > simulatedStats.quotaLimit) {
       setErrorMsg(`Você atingiu o limite de vídeos do seu plano (${simulatedStats.quotaLimit}). Faça um upgrade para enviar mais.`);
       return;
     }
@@ -290,6 +321,7 @@ export default function App() {
     try {
       const res = await fetch(`${API_BASE}/api/upload`, {
         method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` },
         body: formData
       });
       const data = await res.json();
@@ -320,6 +352,7 @@ export default function App() {
     try {
       const res = await fetch(`${API_BASE}/api/upload-intro-photo`, {
         method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` },
         body: formData
       });
       const data = await res.json();
@@ -351,11 +384,15 @@ export default function App() {
     try {
       const res = await fetch(`${API_BASE}/api/process`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
         body: JSON.stringify({
           taskIds,
           blackScreenDuration,
-          customPhotoPath: customPhoto.photoPath
+          customPhotoPath: customPhoto.photoPath,
+          preset: platformPreset
         })
       });
       const data = await res.json();
@@ -375,7 +412,10 @@ export default function App() {
   const deleteTask = async (id) => {
     setTasks(prev => prev.filter(t => t.id !== id));
     try {
-      await fetch(`${API_BASE}/api/tasks/${id}`, { method: 'DELETE' });
+      await fetch(`${API_BASE}/api/tasks/${id}`, { 
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
     } catch (e) {
       console.error('Erro ao deletar no servidor:', e);
     }
@@ -393,35 +433,12 @@ export default function App() {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   };
 
-  // --- INTERAÇÕES SIMULADAS ---
+  // --- LÓGICA DE SUPORTE E FAQ ---
   const toggleFaq = (index) => {
     setFaqExpanded(prev => ({
       ...prev,
       [index]: !prev[index]
     }));
-  };
-
-  const openCheckout = (planName, price) => {
-    setCheckoutModal({ show: true, planName, price });
-    setCheckoutSuccess(false);
-    setCheckoutLoading(false);
-  };
-
-  const closeCheckout = () => {
-    setCheckoutModal({ show: false, planName: '', price: '' });
-  };
-
-  const handleCheckoutSubmit = (e) => {
-    e.preventDefault();
-    setCheckoutLoading(true);
-    setTimeout(() => {
-      setCheckoutLoading(false);
-      setCheckoutSuccess(true);
-      setTimeout(() => {
-        setPlan(checkoutModal.planName);
-        closeCheckout();
-      }, 1500);
-    }, 2000);
   };
 
   const handleSupportSubmit = (e) => {
@@ -433,18 +450,311 @@ export default function App() {
     }, 4000);
   };
 
-  // --- ELEMENTOS DE VIEW ---
+  // --- LÓGICA DE CADASTRO E LOGIN (REAL) ---
+  const handleAuthSubmit = async (e) => {
+    e.preventDefault();
+    setAuthModal(prev => ({ ...prev, error: '' }));
+    
+    const endpoint = authModal.mode === 'register' ? '/api/auth/register' : '/api/auth/login';
+    const payload = authModal.mode === 'register' 
+      ? { email: authModal.email, password: authModal.password, name: authModal.name }
+      : { email: authModal.email, password: authModal.password };
 
-  // 1. LANDING PAGE
+    try {
+      const res = await fetch(`${API_BASE}${endpoint}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      
+      if (!res.ok) {
+        throw new Error(data.error || 'Falha ao autenticar.');
+      }
+
+      localStorage.setItem('conclave_token', data.token);
+      setToken(data.token);
+      setAuthModal({ show: false, mode: 'login', email: '', password: '', name: '', error: '' });
+    } catch (err) {
+      setAuthModal(prev => ({ ...prev, error: err.message }));
+    }
+  };
+
+  const handleLogout = async () => {
+    if (token) {
+      try {
+        await fetch(`${API_BASE}/api/auth/logout`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
+      } catch (e) {}
+    }
+    localStorage.removeItem('conclave_token');
+    setToken('');
+    setView('landing');
+    setTasks([]);
+  };
+
+  // --- LÓGICA DE CHECKOUT E UPGRADE (REAL SALVANDO NO BANCO) ---
+  const openCheckout = (planName, price) => {
+    if (!token) {
+      setAuthModal({ show: true, mode: 'register', email: '', password: '', name: '', error: 'Crie uma conta gratuita antes de fazer o upgrade!' });
+      return;
+    }
+    setCheckoutModal({ show: true, planName, price });
+    setCheckoutSuccess(false);
+    setCheckoutLoading(false);
+  };
+
+  const closeCheckout = () => {
+    setCheckoutModal({ show: false, planName: '', price: '' });
+  };
+
+  const handleCheckoutSubmit = async (e) => {
+    e.preventDefault();
+    setCheckoutLoading(true);
+    
+    try {
+      const res = await fetch(`${API_BASE}/api/auth/upgrade`, {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({ plan: checkoutModal.planName })
+      });
+      const data = await res.json();
+      
+      if (!res.ok) throw new Error(data.error || 'Falha ao salvar upgrade.');
+      
+      setTimeout(() => {
+        setCheckoutLoading(false);
+        setCheckoutSuccess(true);
+        setTimeout(() => {
+          setPlan(data.user.plan);
+          fetchUserData(token); // Atualizar limites de cota instantaneamente
+          closeCheckout();
+        }, 1500);
+      }, 2000);
+    } catch (err) {
+      alert(err.message);
+      setCheckoutLoading(false);
+    }
+  };
+
+  // --- RENDERS ---
+
+  // 1. MODAL DE CHECKOUT
+  function renderCheckoutModal() {
+    if (!checkoutModal.show) return null;
+    
+    return (
+      <div className="checkout-overlay">
+        <div className="checkout-modal">
+          <div className="checkout-header">
+            <h3>Assinar Plano {checkoutModal.planName}</h3>
+            <button className="checkout-close-btn" onClick={closeCheckout}>
+              <svg width="20" height="20" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2.5">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+          
+          <form onSubmit={handleCheckoutSubmit}>
+            <div className="checkout-body">
+              {checkoutSuccess ? (
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '2rem 0', textAlign: 'center', gap: '1rem' }}>
+                  <div style={{ width: '60px', height: '60px', borderRadius: '50%', background: 'hsl(var(--accent-emerald) / 0.15)', color: 'hsl(var(--accent-emerald))', display: 'flex', alignItems: 'center', justify: 'center', fontSize: '2rem' }}>
+                    ✓
+                  </div>
+                  <h3>Assinatura Confirmada!</h3>
+                  <p style={{ color: 'hsl(var(--text-muted))', fontSize: '0.85rem' }}>Seu plano foi alterado para {checkoutModal.planName}. Aproveite os novos limites!</p>
+                </div>
+              ) : (
+                <>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.75rem 1rem', background: 'hsl(var(--bg-obsidian))', borderRadius: '8px', border: '1px solid hsl(var(--border-subtle))' }}>
+                    <div>
+                      <strong>Adesão Mensal</strong>
+                      <p style={{ fontSize: '0.75rem', color: 'hsl(var(--text-muted))' }}>Plano {checkoutModal.planName}</p>
+                    </div>
+                    <span style={{ fontSize: '1.25rem', fontWeight: 'bold', color: 'hsl(var(--primary-hover))' }}>{checkoutModal.price}/mês</span>
+                  </div>
+
+                  <div className="checkout-tabs">
+                    <button type="button" className={`checkout-tab ${checkoutTab === 'pix' ? 'active' : ''}`} onClick={() => setCheckoutTab('pix')}>
+                      Pix Instantâneo
+                    </button>
+                    <button type="button" className={`checkout-tab ${checkoutTab === 'card' ? 'active' : ''}`} onClick={() => setCheckoutTab('card')}>
+                      Cartão de Crédito
+                    </button>
+                  </div>
+
+                  {checkoutTab === 'pix' ? (
+                    <div className="checkout-pix-container">
+                      <div className="checkout-qr-code">
+                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', width: '100%', height: '100%', background: '#f8fafc', color: '#1e293b', fontSize: '0.65rem', fontWeight: 'bold' }}>
+                          <span style={{ fontSize: '2.5rem', marginBottom: '0.25rem' }}>📱</span>
+                          Pix QR Code
+                        </div>
+                      </div>
+                      <p style={{ fontSize: '0.75rem', color: 'hsl(var(--text-muted))', maxWidth: '300px' }}>
+                        Escaneie o QR Code acima pelo aplicativo do seu banco para ativar a assinatura imediatamente.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="checkout-card-form">
+                      <div className="settings-group">
+                        <label>Número do Cartão</label>
+                        <input type="text" className="form-input" placeholder="4444 4444 4444 4444" required />
+                      </div>
+                      <div className="settings-group">
+                        <label>Nome Impresso</label>
+                        <input type="text" className="form-input" placeholder="NOME DO TITULAR" required />
+                      </div>
+                      <div className="form-row">
+                        <div className="settings-group">
+                          <label>Validade</label>
+                          <input type="text" className="form-input" placeholder="MM/AA" required />
+                        </div>
+                        <div className="settings-group">
+                          <label>CVV</label>
+                          <input type="text" className="form-input" placeholder="123" required />
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  <button 
+                    type="submit" 
+                    className="btn btn-primary" 
+                    style={{ padding: '0.8rem', fontSize: '0.95rem' }} 
+                    disabled={checkoutLoading}
+                  >
+                    {checkoutLoading ? (
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem' }}>
+                        <div className="spinner"></div>
+                        Processando Pagamento...
+                      </div>
+                    ) : (
+                      `Confirmar Assinatura (${checkoutModal.price}/mês)`
+                    )}
+                  </button>
+                </>
+              )}
+            </div>
+          </form>
+        </div>
+      </div>
+    );
+  }
+
+  // 2. MODAL DE CADASTRO E LOGIN
+  function renderAuthModal() {
+    if (!authModal.show) return null;
+    
+    return (
+      <div className="checkout-overlay">
+        <div className="checkout-modal" style={{ maxWidth: '420px' }}>
+          <div className="checkout-header">
+            <h3>{authModal.mode === 'register' ? 'Criar Conta Gratuita' : 'Entrar no Conclave'}</h3>
+            <button className="checkout-close-btn" onClick={() => setAuthModal(prev => ({ ...prev, show: false }))}>
+              <svg width="20" height="20" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2.5">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+          
+          <form onSubmit={handleAuthSubmit}>
+            <div className="checkout-body">
+              {authModal.error && (
+                <div style={{ background: 'hsl(var(--accent-rose) / 0.15)', color: 'hsl(var(--accent-rose))', padding: '0.75rem', borderRadius: '8px', border: '1px solid hsl(var(--accent-rose) / 0.3)', fontSize: '0.85rem' }}>
+                  {authModal.error}
+                </div>
+              )}
+
+              {authModal.mode === 'register' && (
+                <div className="settings-group">
+                  <label>Nome Completo</label>
+                  <input 
+                    type="text" 
+                    className="form-input" 
+                    placeholder="Seu nome" 
+                    required 
+                    value={authModal.name}
+                    onChange={(e) => setAuthModal(prev => ({ ...prev, name: e.target.value }))}
+                  />
+                </div>
+              )}
+
+              <div className="settings-group">
+                <label>E-mail</label>
+                <input 
+                  type="email" 
+                  className="form-input" 
+                  placeholder="seuemail@exemplo.com" 
+                  required 
+                  value={authModal.email}
+                  onChange={(e) => setAuthModal(prev => ({ ...prev, email: e.target.value }))}
+                />
+              </div>
+
+              <div className="settings-group">
+                <label>Senha</label>
+                <input 
+                  type="password" 
+                  className="form-input" 
+                  placeholder="••••••••" 
+                  required 
+                  value={authModal.password}
+                  onChange={(e) => setAuthModal(prev => ({ ...prev, password: e.target.value }))}
+                />
+              </div>
+
+              <button type="submit" className="btn btn-primary" style={{ padding: '0.75rem' }}>
+                {authModal.mode === 'register' ? 'Criar Conta' : 'Entrar'}
+              </button>
+
+              <div style={{ textAlign: 'center', fontSize: '0.85rem', color: 'hsl(var(--text-gray))', marginTop: '0.5rem' }}>
+                {authModal.mode === 'register' ? (
+                  <span>
+                    Já possui conta?{' '}
+                    <a 
+                      href="#" 
+                      onClick={(e) => { e.preventDefault(); setAuthModal(prev => ({ ...prev, mode: 'login', error: '' })); }}
+                      style={{ color: 'hsl(var(--primary-hover))', fontWeight: 600, textDecoration: 'none' }}
+                    >
+                      Faça Login
+                    </a>
+                  </span>
+                ) : (
+                  <span>
+                    Não tem conta?{' '}
+                    <a 
+                      href="#" 
+                      onClick={(e) => { e.preventDefault(); setAuthModal(prev => ({ ...prev, mode: 'register', error: '' })); }}
+                      style={{ color: 'hsl(var(--primary-hover))', fontWeight: 600, textDecoration: 'none' }}
+                    >
+                      Cadastre-se Grátis
+                    </a>
+                  </span>
+                )}
+              </div>
+            </div>
+          </form>
+        </div>
+      </div>
+    );
+  }
+
+  // 3. LANDING PAGE
   if (view === 'landing') {
     return (
       <div className="landing-page">
-        {/* Confetes opcionais */}
         {showConfetti && <ConfettiEffect />}
         
         {/* Navigation */}
         <nav className="landing-nav">
-          <div className="logo-container">
+          <div className="logo-container" onClick={() => setView('landing')} style={{ cursor: 'pointer' }}>
             <div className="logo-icon">C</div>
             <span style={{ fontSize: '1.5rem', fontWeight: 800, fontFamily: 'Outfit', letterSpacing: '-0.02em' }}>
               CONCLAVE
@@ -454,9 +764,15 @@ export default function App() {
             <a href="#features">Recursos</a>
             <a href="#pricing">Preços</a>
             <a href="#faq">FAQ</a>
-            <button className="btn btn-secondary" style={{ width: 'auto', padding: '0.5rem 1.25rem' }} onClick={() => setView('app')}>
-              Entrar
-            </button>
+            {token ? (
+              <button className="btn btn-primary" style={{ width: 'auto', padding: '0.5rem 1.25rem' }} onClick={() => setView('app')}>
+                Ir para o Painel
+              </button>
+            ) : (
+              <button className="btn btn-secondary" style={{ width: 'auto', padding: '0.5rem 1.25rem' }} onClick={() => setAuthModal({ show: true, mode: 'login', email: '', password: '', name: '', error: '' })}>
+                Entrar
+              </button>
+            )}
           </div>
         </nav>
 
@@ -471,8 +787,11 @@ export default function App() {
           </p>
           <div className="landing-hero-ctas">
             <button className="btn btn-primary" style={{ width: 'auto', padding: '0.8rem 2rem', fontSize: '1rem' }} onClick={() => {
-              setView('app');
-              setActiveTab('editor');
+              if (token) {
+                setView('app');
+              } else {
+                setAuthModal({ show: true, mode: 'register', email: '', password: '', name: '', error: '' });
+              }
             }}>
               Começar Agora Grátis
             </button>
@@ -556,8 +875,11 @@ export default function App() {
                 </li>
               </ul>
               <button className="btn btn-secondary" onClick={() => {
-                setView('app');
-                setActiveTab('editor');
+                if (token) {
+                  setView('app');
+                } else {
+                  setAuthModal({ show: true, mode: 'register', email: '', password: '', name: '', error: '' });
+                }
               }}>
                 Usar Grátis
               </button>
@@ -668,33 +990,32 @@ export default function App() {
           </div>
         </section>
 
-        {/* Landing Footer */}
+        {/* Footer */}
         <footer style={{ background: 'hsl(var(--bg-panel))', borderTop: '1px solid hsl(var(--border-subtle))', padding: '3rem 2rem', textAlign: 'center', color: 'hsl(var(--text-muted))', fontSize: '0.875rem' }}>
           <p>© 2026 CONCLAVE Automation Studio. Todos os direitos reservados.</p>
         </footer>
 
-        {/* Modal de checkout */}
+        {/* Modais de autenticação e checkout */}
+        {renderAuthModal()}
         {renderCheckoutModal()}
       </div>
     );
   }
 
-  // 2. DASHBOARD PRIVADO COM SIDEBAR
+  // 4. PRIVATE APP VIEW
   return (
     <div className="saas-layout">
-      {/* Confetes de Sucesso */}
+      {/* Confetes */}
       {showConfetti && <ConfettiEffect />}
       
-      {/* Sidebar de Navegação */}
+      {/* Sidebar */}
       <aside className="saas-sidebar">
         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-          {/* Logo */}
           <div className="saas-sidebar-brand" onClick={() => setView('landing')} style={{ cursor: 'pointer' }}>
             <div className="logo-icon">C</div>
             <h1>CONCLAVE</h1>
           </div>
 
-          {/* Nav Links */}
           <nav className="saas-sidebar-nav">
             <button className={`saas-nav-link ${activeTab === 'editor' ? 'active' : ''}`} onClick={() => setActiveTab('editor')}>
               <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
@@ -736,11 +1057,11 @@ export default function App() {
           </nav>
         </div>
 
-        {/* Sidebar Footer (Profile + Quota Indicator) */}
+        {/* Sidebar Profile Card & Real Quota */}
         <div className="saas-sidebar-profile">
           <div className="quota-bar-container" style={{ marginBottom: '0.5rem' }}>
             <div className="quota-bar-header">
-              <span>Cota de Vídeos</span>
+              <span>Vídeos Edições</span>
               <span>{simulatedStats.quotaUsed} / {plan === 'Business' ? '∞' : simulatedStats.quotaLimit}</span>
             </div>
             <div className="quota-bar-track">
@@ -761,22 +1082,21 @@ export default function App() {
             </div>
           </div>
           
-          <button className="btn btn-secondary" style={{ padding: '0.4rem', fontSize: '0.8rem', width: '100%', borderColor: 'rgba(239, 68, 68, 0.2)', color: '#ef4444' }} onClick={() => setView('landing')}>
+          <button className="btn btn-secondary" style={{ padding: '0.4rem', fontSize: '0.8rem', width: '100%', borderColor: 'rgba(239, 68, 68, 0.2)', color: '#ef4444' }} onClick={handleLogout}>
             Sair da Conta
           </button>
         </div>
       </aside>
 
-      {/* Área de Conteúdo Principal */}
+      {/* Main Content */}
       <main className="saas-content">
-        {/* Renderiza a aba ativa */}
         {renderActiveTabContent()}
       </main>
 
-      {/* Modal de checkout */}
+      {/* Checkout Modal */}
       {renderCheckoutModal()}
 
-      {/* Modal de visualização de vídeo (existente) */}
+      {/* Preview Player Modal */}
       {previewVideoUrl && (
         <div className="video-preview-overlay" onClick={() => setPreviewVideoUrl(null)}>
           <div className="video-preview-modal panel" onClick={(e) => e.stopPropagation()} style={{ padding: 0, overflow: 'hidden' }}>
@@ -818,7 +1138,7 @@ export default function App() {
                 Fechar
               </button>
               <a 
-                href={`${API_BASE}/api/download/${previewVideoUrl.split('processed_')[1].split('.mp4')[0]}`}
+                href={`${API_BASE}/api/download/${previewVideoUrl.split('processed_')[1].split('.mp4')[0]}?token=${token}`}
                 className="btn btn-primary" 
                 style={{ width: 'auto', padding: '0.5rem 1.25rem', textDecoration: 'none', fontSize: '0.9rem' }}
               >
@@ -831,8 +1151,6 @@ export default function App() {
     </div>
   );
 
-  // --- COMPONENTES AUXILIARES DE RENDERIZAÇÃO ---
-
   function renderActiveTabContent() {
     switch (activeTab) {
       // 1. ABA DO EDITOR DE VÍDEO REAL
@@ -844,7 +1162,6 @@ export default function App() {
         
         return (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
-            {/* Header Interno */}
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <div>
                 <h1 style={{ fontSize: '1.75rem' }}>Editor de Vídeo</h1>
@@ -852,7 +1169,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* Grid Principal do Editor */}
             <div className="dashboard-grid">
               <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
                 {/* Zona de Upload */}
@@ -886,7 +1202,6 @@ export default function App() {
                   )}
                 </div>
 
-                {/* Mensagem de erro */}
                 {errorMsg && (
                   <div className="error-alert" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: 'hsl(var(--accent-rose) / 0.15)', color: 'hsl(var(--accent-rose))', padding: '1rem', borderRadius: '12px', border: '1px solid hsl(var(--accent-rose) / 0.3)' }}>
                     <svg width="20" height="20" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2.5">
@@ -963,7 +1278,7 @@ export default function App() {
                                     </svg>
                                   </button>
                                   <a 
-                                    href={`${API_BASE}/api/download/${task.id}`} 
+                                    href={`${API_BASE}/api/download/${task.id}?token=${token}`} 
                                     download={`${task.originalName.replace(/\.[^/.]+$/, "")}_editado.mp4`}
                                     className="action-icon download"
                                     title="Baixar Vídeo MP4"
@@ -1000,7 +1315,7 @@ export default function App() {
                       </div>
                       <div className="actions-right" style={{ display: 'flex', gap: '0.5rem' }}>
                         {completedCount > 0 && (
-                          <a href={`${API_BASE}/api/download-all`} className="btn btn-secondary" style={{ textDecoration: 'none', width: 'auto', borderColor: 'hsl(var(--primary) / 0.2)', display: 'inline-flex', alignItems: 'center', gap: '0.4rem' }}>
+                          <a href={`${API_BASE}/api/download-all?token=${token}`} className="btn btn-secondary" style={{ textDecoration: 'none', width: 'auto', borderColor: 'hsl(var(--primary) / 0.2)', display: 'inline-flex', alignItems: 'center', gap: '0.4rem' }}>
                             <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
                               <path strokeLinecap="round" strokeLinejoin="round" d="M8 4H6a2 2 0 00-2 2v12a2 2 0 002 2h12a2 2 0 002-2V6a2 2 0 00-2-2h-2m-4-1v8m0 0l3-3m-3 3L9 8m-5 5h2.586a1 1 0 01.707.293l2.414 2.414a1 1 0 00.707.293h3.172a1 1 0 00.707-.293l2.414-2.414a1 1 0 01.707-.293H20" />
                             </svg>
@@ -1041,11 +1356,10 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Coluna Lateral de Controles do Editor */}
+              {/* Controles de Capa e Presets */}
               <div className="panel" style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
                 <h3 className="panel-title" style={{ margin: 0, paddingBottom: '0.75rem' }}>⚙️ Painel de Controle</h3>
                 
-                {/* Seleção do Preset */}
                 <div className="settings-group">
                   <label>Preset da Plataforma</label>
                   <div className="preset-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem' }}>
@@ -1064,13 +1378,12 @@ export default function App() {
                       style={{ padding: '0.75rem', border: '1px solid hsl(var(--border-subtle))', borderRadius: '10px', textAlign: 'center', cursor: 'pointer', background: platformPreset === 'shorts' ? 'hsl(var(--primary) / 0.05)' : 'transparent', borderColor: platformPreset === 'shorts' ? 'hsl(var(--primary))' : 'hsl(var(--border-subtle))' }}
                     >
                       <span style={{ display: 'block', fontSize: '1.25rem', marginBottom: '0.25rem' }}>📺</span>
-                      <strong style={{ fontSize: '0.85rem', display: 'block' }}>Shorts / Shorts</strong>
+                      <strong style={{ fontSize: '0.85rem', display: 'block' }}>Shorts</strong>
                       <span style={{ fontSize: '0.7rem', color: 'hsl(var(--text-muted))' }}>Vertical HD</span>
                     </div>
                   </div>
                 </div>
 
-                {/* Seleção do Fim (Tela Preta) */}
                 <div className="settings-group">
                   <label>Duração da Tela Preta (Fim)</label>
                   <div className="duration-selector" style={{ display: 'flex', gap: '0.5rem' }}>
@@ -1090,7 +1403,6 @@ export default function App() {
                   </p>
                 </div>
 
-                {/* Imagem de Introdução Customizada */}
                 <div className="settings-group" style={{ borderTop: '1px solid hsl(var(--border-subtle))', paddingTop: '1.25rem' }}>
                   <label>Imagem de Introdução (0.5 Segundos)</label>
                   
@@ -1119,10 +1431,10 @@ export default function App() {
                         disabled={uploadingPhoto}
                       >
                         {uploadingPhoto ? (
-                          <>
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.4rem' }}>
                             <div className="spinner"></div>
-                            Carregando Foto...
-                          </>
+                            Carregando...
+                          </div>
                         ) : (
                           'Upload de Capa Customizada'
                         )}
@@ -1145,55 +1457,51 @@ export default function App() {
           </div>
         );
 
-      // 2. ABA DE ESTATÍSTICAS (SIMULADO)
+      // 2. ABA DE ESTATÍSTICAS REAIS
       case 'stats':
         return (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
             <div>
               <h1 style={{ fontSize: '1.75rem' }}>Estatísticas da Conta</h1>
-              <p style={{ color: 'hsl(var(--text-gray))', fontSize: '0.9rem' }}>Veja dados de engajamento e histórico de uso da sua conta no CONCLAVE.</p>
+              <p style={{ color: 'hsl(var(--text-gray))', fontSize: '0.9rem' }}>Veja dados de uso real calculados diretamente a partir dos seus processamentos.</p>
             </div>
 
-            {/* Quatro Cards Grandes */}
             <div className="stats-large-grid">
               <div className="stat-large-card">
                 <span style={{ fontSize: '0.85rem', color: 'hsl(var(--text-muted))' }}>Total Processado</span>
                 <span className="stat-large-value gold">{simulatedStats.totalVideos}</span>
-                <span style={{ fontSize: '0.75rem', color: 'hsl(var(--accent-emerald))' }}>+ {simulatedStats.totalVideos - 12} esta semana</span>
+                <span style={{ fontSize: '0.75rem', color: 'hsl(var(--accent-emerald))' }}>Real do histórico</span>
               </div>
               <div className="stat-large-card">
                 <span style={{ fontSize: '0.85rem', color: 'hsl(var(--text-muted))' }}>Tempo Economizado</span>
                 <span className="stat-large-value cyan">{simulatedStats.timeSavedMinutes} min</span>
-                <span style={{ fontSize: '0.75rem', color: 'hsl(var(--text-muted))' }}>≈ {(simulatedStats.timeSavedMinutes / 60).toFixed(1)} horas</span>
+                <span style={{ fontSize: '0.75rem', color: 'hsl(var(--text-muted))' }}>≈ {(simulatedStats.timeSavedMinutes / 60).toFixed(1)} horas reais</span>
               </div>
               <div className="stat-large-card">
-                <span style={{ fontSize: '0.85rem', color: 'hsl(var(--text-muted))' }}>Armazenamento</span>
-                <span className="stat-large-value emerald">{simulatedStats.storageUsedGB.toFixed(1)} GB</span>
+                <span style={{ fontSize: '0.85rem', color: 'hsl(var(--text-muted))' }}>Armazenamento Real</span>
+                <span className="stat-large-value emerald">{simulatedStats.storageUsedGB.toFixed(3)} GB</span>
                 <span style={{ fontSize: '0.75rem', color: 'hsl(var(--text-muted))' }}>de {simulatedStats.storageLimitGB} GB contratados</span>
               </div>
               <div className="stat-large-card">
                 <span style={{ fontSize: '0.85rem', color: 'hsl(var(--text-muted))' }}>Fila Concorrente</span>
                 <span className="stat-large-value">10 slots</span>
-                <span style={{ fontSize: '0.75rem', color: 'hsl(var(--text-muted))' }}>Sem fila de espera</span>
+                <span style={{ fontSize: '0.75rem', color: 'hsl(var(--text-muted))' }}>Limite ativo</span>
               </div>
             </div>
 
-            {/* Linha de Gráficos CSS */}
+            {/* Linha de Gráficos */}
             <div className="chart-row">
               <div className="panel">
-                <h3 className="panel-title">Uso de Vídeos Mensal</h3>
+                <h3 className="panel-title">Uso Real do Ciclo Corrente</h3>
                 <div className="simulated-chart-bar-container">
                   {[
-                    { month: 'Janeiro', count: 12, percent: 30 },
-                    { month: 'Fevereiro', count: 28, percent: 55 },
-                    { month: 'Março', count: 32, percent: 65 },
-                    { month: 'Abril', count: 48, percent: 85 },
-                    { month: 'Maio (Corrente)', count: simulatedStats.totalVideos, percent: Math.min((simulatedStats.totalVideos / simulatedStats.quotaLimit) * 100, 100) }
+                    { label: 'Vídeos Processados no Mês', count: simulatedStats.quotaUsed, total: simulatedStats.quotaLimit, percent: plan === 'Business' ? 5 : Math.min((simulatedStats.quotaUsed / simulatedStats.quotaLimit) * 100, 100) },
+                    { label: 'Armazenamento Utilizado', count: `${simulatedStats.storageUsedGB.toFixed(3)} GB`, total: `${simulatedStats.storageLimitGB} GB`, percent: Math.min((simulatedStats.storageUsedGB / simulatedStats.storageLimitGB) * 100, 100) }
                   ].map((bar, idx) => (
                     <div className="chart-bar-item" key={idx}>
                       <div className="chart-bar-labels">
-                        <strong>{bar.month}</strong>
-                        <span>{bar.count} vídeos</span>
+                        <strong>{bar.label}</strong>
+                        <span>{bar.count} / {plan === 'Business' && idx === 0 ? 'ILIMITADO' : bar.total}</span>
                       </div>
                       <div className="chart-bar-track">
                         <div className="chart-bar-fill" style={{ width: `${bar.percent}%` }}></div>
@@ -1204,83 +1512,106 @@ export default function App() {
               </div>
 
               <div className="panel" style={{ display: 'flex', flexDirection: 'column', justifyBetween: 'center' }}>
-                <h3 className="panel-title">Distribuição de Presets</h3>
+                <h3 className="panel-title">Distribuição de Presets Reais</h3>
                 <div style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: '1.25rem', padding: '1rem 0' }}>
-                  {[
-                    { label: 'Reels / TikTok (9:16)', count: 9, color: 'hsl(var(--primary))' },
-                    { label: 'YouTube Shorts (9:16)', count: 5, color: 'hsl(var(--accent-cyan))' }
-                  ].map((dist, idx) => (
-                    <div key={idx} style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                      <div style={{ width: '12px', height: '12px', borderRadius: '50%', backgroundColor: dist.color }}></div>
-                      <div style={{ flex: 1 }}>
-                        <span style={{ fontSize: '0.85rem', fontWeight: 600 }}>{dist.label}</span>
-                        <div style={{ height: '4px', background: 'hsl(var(--border-subtle))', borderRadius: '2px', marginTop: '0.25rem', overflow: 'hidden' }}>
-                          <div style={{ width: `${(dist.count / 14) * 100}%`, height: '100%', backgroundColor: dist.color }}></div>
+                  {(() => {
+                    const reelsCount = simulatedHistory.filter(h => h.preset === 'Reels (9:16)').length;
+                    const shortsCount = simulatedHistory.filter(h => h.preset === 'Shorts (9:16)').length;
+                    const total = reelsCount + shortsCount || 1;
+                    
+                    return (
+                      <>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                          <div style={{ width: '12px', height: '12px', borderRadius: '50%', backgroundColor: 'hsl(var(--primary))' }}></div>
+                          <div style={{ flex: 1 }}>
+                            <span style={{ fontSize: '0.85rem', fontWeight: 600 }}>Reels / TikTok</span>
+                            <div style={{ height: '4px', background: 'hsl(var(--border-subtle))', borderRadius: '2px', marginTop: '0.25rem', overflow: 'hidden' }}>
+                              <div style={{ width: `${(reelsCount / total) * 100}%`, height: '100%', backgroundColor: 'hsl(var(--primary))' }}></div>
+                            </div>
+                          </div>
+                          <span style={{ fontSize: '0.85rem', color: 'hsl(var(--text-muted))' }}>{Math.round((reelsCount / total) * 100)}% ({reelsCount})</span>
                         </div>
-                      </div>
-                      <span style={{ fontSize: '0.85rem', color: 'hsl(var(--text-muted))' }}>{Math.round((dist.count / 14) * 100)}%</span>
-                    </div>
-                  ))}
+
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                          <div style={{ width: '12px', height: '12px', borderRadius: '50%', backgroundColor: 'hsl(var(--accent-cyan))' }}></div>
+                          <div style={{ flex: 1 }}>
+                            <span style={{ fontSize: '0.85rem', fontWeight: 600 }}>Shorts (Vertical HD)</span>
+                            <div style={{ height: '4px', background: 'hsl(var(--border-subtle))', borderRadius: '2px', marginTop: '0.25rem', overflow: 'hidden' }}>
+                              <div style={{ width: `${(shortsCount / total) * 100}%`, height: '100%', backgroundColor: 'hsl(var(--accent-cyan))' }}></div>
+                            </div>
+                          </div>
+                          <span style={{ fontSize: '0.85rem', color: 'hsl(var(--text-muted))' }}>{Math.round((shortsCount / total) * 100)}% ({shortsCount})</span>
+                        </div>
+                      </>
+                    );
+                  })()}
                 </div>
               </div>
             </div>
           </div>
         );
 
-      // 3. ABA DE HISTÓRICO (SIMULADO)
+      // 3. ABA DE HISTÓRICO REAL DO BANCO
       case 'history':
         return (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
             <div>
               <h1 style={{ fontSize: '1.75rem' }}>Histórico de Exportações</h1>
-              <p style={{ color: 'hsl(var(--text-gray))', fontSize: '0.9rem' }}>Todos os seus vídeos editados e disponíveis para baixar de forma rápida.</p>
+              <p style={{ color: 'hsl(var(--text-gray))', fontSize: '0.9rem' }}>Vídeos salvos e computados da sua conta local.</p>
             </div>
 
             <div className="panel" style={{ padding: '1rem' }}>
               <div className="history-table-wrapper">
-                <table className="history-table">
-                  <thead>
-                    <tr>
-                      <th>Arquivo Original</th>
-                      <th>Tamanho</th>
-                      <th>Data</th>
-                      <th>Preset</th>
-                      <th>Status</th>
-                      <th style={{ textAlign: 'right' }}>Ação</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {simulatedHistory.map(row => (
-                      <tr key={row.id}>
-                        <td style={{ fontWeight: 600 }}>
-                          <span style={{ marginRight: '0.5rem' }}>🎬</span>
-                          {row.name}
-                        </td>
-                        <td>{row.size}</td>
-                        <td>{row.date}</td>
-                        <td>{row.preset}</td>
-                        <td>
-                          <span className="status-indicator completed">
-                            <span style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: '#10B981' }}></span>
-                            {row.status === 'completed' ? 'Finalizado' : 'Erro'}
-                          </span>
-                        </td>
-                        <td style={{ textAlign: 'right' }}>
-                          {/* Botão de download fictício */}
-                          <button 
-                            className="btn btn-secondary" 
-                            style={{ width: 'auto', padding: '0.4rem 0.75rem', fontSize: '0.8rem', borderColor: 'hsl(var(--primary) / 0.2)' }}
-                            onClick={() => {
-                              alert(`Simulando download de: ${row.name}`);
-                            }}
-                          >
-                            Baixar Novamente
-                          </button>
-                        </td>
+                {simulatedHistory.length === 0 ? (
+                  <div className="empty-state">
+                    <span className="empty-state-icon">📜</span>
+                    <h3>Nenhum vídeo processado ainda</h3>
+                    <p>O histórico do seu usuário aparecerá aqui à medida que seus vídeos forem exportados.</p>
+                  </div>
+                ) : (
+                  <table className="history-table">
+                    <thead>
+                      <tr>
+                        <th>Arquivo Original</th>
+                        <th>Tamanho</th>
+                        <th>Data</th>
+                        <th>Preset</th>
+                        <th>Status</th>
+                        <th style={{ textAlign: 'right' }}>Ações</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody>
+                      {simulatedHistory.map(row => (
+                        <tr key={row.id}>
+                          <td style={{ fontWeight: 600 }}>
+                            <span style={{ marginRight: '0.5rem' }}>🎬</span>
+                            {row.originalName}
+                          </td>
+                          <td>{formatSize(row.size)}</td>
+                          <td>{new Date(row.createdAt).toLocaleDateString('pt-BR')}</td>
+                          <td>{row.preset}</td>
+                          <td>
+                            <span className="status-indicator completed">
+                              <span style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: '#10B981' }}></span>
+                              Finalizado
+                            </span>
+                          </td>
+                          <td style={{ textAlign: 'right' }}>
+                            <button 
+                              className="btn btn-secondary" 
+                              style={{ width: 'auto', padding: '0.4rem 0.75rem', fontSize: '0.8rem', borderColor: 'hsl(var(--primary) / 0.2)' }}
+                              onClick={() => {
+                                alert(`Download do arquivo do banco disponível via painel de downloads do editor.`);
+                              }}
+                            >
+                              Registrado
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
               </div>
             </div>
           </div>
@@ -1292,10 +1623,9 @@ export default function App() {
           <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
             <div>
               <h1 style={{ fontSize: '1.75rem' }}>Meu Plano</h1>
-              <p style={{ color: 'hsl(var(--text-gray))', fontSize: '0.9rem' }}>Gerencie suas assinaturas, faturas e cota de uso do CONCLAVE.</p>
+              <p style={{ color: 'hsl(var(--text-gray))', fontSize: '0.9rem' }}>Gerencie suas assinaturas locais e cotas de uso do CONCLAVE.</p>
             </div>
 
-            {/* Plano Atual */}
             <div className="panel" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'linear-gradient(90deg, hsl(var(--bg-panel)) 0%, hsl(var(--primary) / 0.05) 100%)' }}>
               <div>
                 <span className="profile-badge pro" style={{ margin: 0, padding: '0.2rem 0.6rem', fontSize: '0.75rem' }}>{plan} Plan</span>
@@ -1312,9 +1642,23 @@ export default function App() {
               </div>
               <div>
                 {plan !== 'Free' && (
-                  <button className="btn btn-secondary" style={{ width: 'auto', borderColor: 'rgba(239, 68, 68, 0.2)', color: '#ef4444' }} onClick={() => {
-                    if (confirm('Deseja realmente cancelar a assinatura? Seus benefícios expirarão no final do ciclo.')) {
-                      setPlan('Free');
+                  <button className="btn btn-secondary" style={{ width: 'auto', borderColor: 'rgba(239, 68, 68, 0.2)', color: '#ef4444' }} onClick={async () => {
+                    if (confirm('Deseja realmente cancelar a assinatura?')) {
+                      try {
+                        const res = await fetch(`${API_BASE}/api/auth/upgrade`, {
+                          method: 'POST',
+                          headers: { 
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${token}`
+                          },
+                          body: JSON.stringify({ plan: 'Free' })
+                        });
+                        const data = await res.json();
+                        setPlan(data.user.plan);
+                        fetchUserData(token);
+                      } catch (e) {
+                        alert('Erro ao cancelar.');
+                      }
                     }
                   }}>
                     Cancelar Assinatura
@@ -1323,7 +1667,7 @@ export default function App() {
               </div>
             </div>
 
-            {/* Tabela de Preços do Dashboard */}
+            {/* Tabela de Preços */}
             <div style={{ marginTop: '1rem' }}>
               <h3 style={{ fontSize: '1.2rem', marginBottom: '1.5rem' }}>Alterar meu plano</h3>
               <div className="pricing-grid">
@@ -1340,8 +1684,22 @@ export default function App() {
                     <li>Cota mensal de 10 vídeos</li>
                     <li>10 GB de armazenamento</li>
                   </ul>
-                  <button className="btn btn-secondary" disabled={plan === 'Free'} onClick={() => setPlan('Free')}>
-                    {plan === 'Free' ? 'Plano Ativo' : 'Downgrade'}
+                  <button className="btn btn-secondary" disabled={plan === 'Free'} onClick={async () => {
+                    try {
+                      const res = await fetch(`${API_BASE}/api/auth/upgrade`, {
+                        method: 'POST',
+                        headers: { 
+                          'Content-Type': 'application/json',
+                          'Authorization': `Bearer ${token}`
+                        },
+                        body: JSON.stringify({ plan: 'Free' })
+                      });
+                      const data = await res.json();
+                      setPlan(data.user.plan);
+                      fetchUserData(token);
+                    } catch (e) {}
+                  }}>
+                    {plan === 'Free' ? 'Plano Ativo' : 'Downgrade para Free'}
                   </button>
                 </div>
 
@@ -1387,22 +1745,36 @@ export default function App() {
           </div>
         );
 
-      // 5. ABA DE CONFIGURAÇÕES (PERFIL & DEV SETTINGS)
+      // 5. ABA DE CONFIGURAÇÕES (PERFIL REAL)
       case 'settings':
         return (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
             <div>
               <h1 style={{ fontSize: '1.75rem' }}>Configurações do Sistema</h1>
-              <p style={{ color: 'hsl(var(--text-gray))', fontSize: '0.9rem' }}>Ajuste os dados da sua conta e credenciais do CONCLAVE.</p>
+              <p style={{ color: 'hsl(var(--text-gray))', fontSize: '0.9rem' }}>Ajuste os dados da sua conta local no CONCLAVE.</p>
             </div>
 
             <div className="dashboard-grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
-              {/* Form de Perfil */}
               <div className="panel">
                 <h3 className="panel-title">👤 Perfil do Usuário</h3>
-                <form onSubmit={(e) => {
+                <form onSubmit={async (e) => {
                   e.preventDefault();
-                  alert('Perfil atualizado com sucesso (Simulado)!');
+                  try {
+                    const res = await fetch(`${API_BASE}/api/auth/profile`, {
+                      method: 'POST',
+                      headers: { 
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${token}`
+                      },
+                      body: JSON.stringify(userProfile)
+                    });
+                    const data = await res.json();
+                    if (!res.ok) throw new Error(data.error || 'Erro ao salvar perfil.');
+                    setUserProfile(data.user);
+                    alert('Perfil atualizado com sucesso no banco de dados local!');
+                  } catch (err) {
+                    alert(err.message);
+                  }
                 }} style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
                   <div className="settings-group">
                     <label>Nome Completo</label>
@@ -1454,8 +1826,7 @@ export default function App() {
                 </form>
               </div>
 
-              {/* Dev settings / Chaves de API */}
-              <div className="panel" style={{ display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+              <div className="panel" style={{ display: 'flex', flexDirection: 'column', justifyBetween: 'center' }}>
                 <div>
                   <h3 className="panel-title">🔑 Chaves de Acesso (API)</h3>
                   <p style={{ fontSize: '0.85rem', color: 'hsl(var(--text-gray))', marginBottom: '1.5rem', lineHeight: '1.5' }}>
@@ -1479,7 +1850,7 @@ export default function App() {
                             type="password" 
                             className="form-input" 
                             readOnly 
-                            value="cc_live_9f8241h892d19d182903e1982dfb" 
+                            value={`cc_live_${userProfile.email.split('@')[0]}_9f8241h892d19d1829`} 
                           />
                           <button className="btn btn-secondary" style={{ width: 'auto', padding: '0.75rem' }} onClick={() => alert('Copiado!')}>
                             Copiar
@@ -1565,7 +1936,7 @@ export default function App() {
                 )}
               </div>
 
-              {/* Resumo do FAQ Rápido */}
+              {/* Status do Sistema */}
               <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
                 <div className="panel" style={{ padding: '1.25rem' }}>
                   <h4 style={{ fontSize: '1rem', marginBottom: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
@@ -1602,109 +1973,5 @@ export default function App() {
       default:
         return null;
     }
-  }
-
-  function renderCheckoutModal() {
-    if (!checkoutModal.show) return null;
-    
-    return (
-      <div className="checkout-overlay">
-        <div className="checkout-modal">
-          <div className="checkout-header">
-            <h3>Assinar Plano {checkoutModal.planName}</h3>
-            <button className="checkout-close-btn" onClick={closeCheckout}>
-              <svg width="20" height="20" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2.5">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-              </svg>
-            </button>
-          </div>
-          
-          <form onSubmit={handleCheckoutSubmit}>
-            <div className="checkout-body">
-              {checkoutSuccess ? (
-                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '2rem 0', textAlign: 'center', gap: '1rem' }}>
-                  <div style={{ width: '60px', height: '60px', borderRadius: '50%', background: 'hsl(var(--accent-emerald) / 0.15)', color: 'hsl(var(--accent-emerald))', display: 'flex', alignItems: 'center', justify: 'center', fontSize: '2rem' }}>
-                    ✓
-                  </div>
-                  <h3>Assinatura Confirmada!</h3>
-                  <p style={{ color: 'hsl(var(--text-muted))', fontSize: '0.85rem' }}>Seu plano foi alterado para {checkoutModal.planName}. Aproveite os novos limites!</p>
-                </div>
-              ) : (
-                <>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.75rem 1rem', background: 'hsl(var(--bg-obsidian))', borderRadius: '8px', border: '1px solid hsl(var(--border-subtle))' }}>
-                    <div>
-                      <strong>Adesão Mensal</strong>
-                      <p style={{ fontSize: '0.75rem', color: 'hsl(var(--text-muted))' }}>Plano {checkoutModal.planName}</p>
-                    </div>
-                    <span style={{ fontSize: '1.25rem', fontWeight: 'bold', color: 'hsl(var(--primary-hover))' }}>{checkoutModal.price}/mês</span>
-                  </div>
-
-                  <div className="checkout-tabs">
-                    <button type="button" className={`checkout-tab ${checkoutTab === 'pix' ? 'active' : ''}`} onClick={() => setCheckoutTab('pix')}>
-                      Pix Instantâneo
-                    </button>
-                    <button type="button" className={`checkout-tab ${checkoutTab === 'card' ? 'active' : ''}`} onClick={() => setCheckoutTab('card')}>
-                      Cartão de Crédito
-                    </button>
-                  </div>
-
-                  {checkoutTab === 'pix' ? (
-                    <div className="checkout-pix-container">
-                      <div className="checkout-qr-code">
-                        {/* Simulador de QR Code */}
-                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', width: '100%', height: '100%', background: '#f8fafc', color: '#1e293b', fontSize: '0.65rem', fontWeight: 'bold' }}>
-                          <span style={{ fontSize: '2.5rem', marginBottom: '0.25rem' }}>📱</span>
-                          Pix QR Code
-                        </div>
-                      </div>
-                      <p style={{ fontSize: '0.75rem', color: 'hsl(var(--text-muted))', maxWidth: '300px' }}>
-                        Escaneie o QR Code acima pelo aplicativo do seu banco para ativar a assinatura imediatamente.
-                      </p>
-                    </div>
-                  ) : (
-                    <div className="checkout-card-form">
-                      <div className="settings-group">
-                        <label>Número do Cartão</label>
-                        <input type="text" className="form-input" placeholder="4444 4444 4444 4444" required />
-                      </div>
-                      <div className="settings-group">
-                        <label>Nome Impresso</label>
-                        <input type="text" className="form-input" placeholder="NOME DO TITULAR" required />
-                      </div>
-                      <div className="form-row">
-                        <div className="settings-group">
-                          <label>Validade</label>
-                          <input type="text" className="form-input" placeholder="MM/AA" required />
-                        </div>
-                        <div className="settings-group">
-                          <label>CVV</label>
-                          <input type="text" className="form-input" placeholder="123" required />
-                        </div>
-                      </div>
-                    </div>
-                  )}
-
-                  <button 
-                    type="submit" 
-                    className="btn btn-primary" 
-                    style={{ padding: '0.8rem', fontSize: '0.95rem' }} 
-                    disabled={checkoutLoading}
-                  >
-                    {checkoutLoading ? (
-                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem' }}>
-                        <div className="spinner"></div>
-                        Processando Pagamento...
-                      </div>
-                    ) : (
-                      `Confirmar Assinatura (${checkoutModal.price}/mês)`
-                    )}
-                  </button>
-                </>
-              )}
-            </div>
-          </form>
-        </div>
-      </div>
-    );
   }
 }

@@ -7,6 +7,17 @@ import { fileURLToPath } from 'url';
 import { v4 as uuidv4 } from 'uuid';
 import AdmZip from 'adm-zip';
 import { processVideo } from './videoProcessor.js';
+import {
+  createUser,
+  validateUser,
+  createSession,
+  destroySession,
+  getUserBySession,
+  updateUserProfile,
+  upgradeUserPlan,
+  addHistory,
+  getUserHistory
+} from './database.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -14,7 +25,7 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 5005;
 
-// Habilitar CORS para permitir o frontend rodar na porta 5173
+// Habilitar CORS para permitir o frontend rodar em qualquer porta/domínio
 app.use(cors());
 app.use(express.json());
 
@@ -41,7 +52,7 @@ function initDirectories() {
 }
 initDirectories();
 
-// Banco de dados em memória para gerenciar o estado dos vídeos
+// Banco de dados em memória para gerenciar o progresso das tarefas de uploads ativos
 const tasksStore = {};
 
 // Configuração do Multer para Upload
@@ -102,8 +113,124 @@ const uploadPhoto = multer({
   }
 });
 
+// Middleware de Autenticação
+const authenticate = (req, res, next) => {
+  let token = req.query.token;
+  if (!token) {
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      token = authHeader.split(' ')[1];
+    }
+  }
+
+  if (!token) {
+    return res.status(401).json({ error: 'Acesso não autorizado. Faça login novamente.' });
+  }
+
+  const user = getUserBySession(token);
+  if (!user) {
+    return res.status(401).json({ error: 'Sessão inválida ou expirada. Faça login novamente.' });
+  }
+
+  req.user = user;
+  req.token = token;
+  next();
+};
+
+// ==========================================
+// ROTAS DE AUTENTICAÇÃO
+// ==========================================
+
+app.post('/api/auth/register', (req, res) => {
+  const { email, password, name } = req.body;
+  if (!email || !password || !name) {
+    return res.status(400).json({ error: 'Por favor, preencha todos os campos.' });
+  }
+
+  try {
+    const user = createUser(email, password, name);
+    const token = createSession(user.id);
+    res.json({ token, user });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.post('/api/auth/login', (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password) {
+    return res.status(400).json({ error: 'Por favor, informe o e-mail e senha.' });
+  }
+
+  const user = validateUser(email, password);
+  if (!user) {
+    return res.status(401).json({ error: 'Credenciais incorretas.' });
+  }
+
+  const token = createSession(user.id);
+  res.json({ token, user });
+});
+
+app.post('/api/auth/logout', authenticate, (req, res) => {
+  destroySession(req.token);
+  res.json({ success: true });
+});
+
+app.get('/api/auth/me', authenticate, (req, res) => {
+  const history = getUserHistory(req.user.id);
+  
+  // Calcular estatísticas reais baseadas no histórico
+  const totalVideos = history.length;
+  const totalDurationSeconds = history.reduce((sum, h) => sum + (h.duration || 0), 0);
+  const timeSavedMinutes = Math.round((totalDurationSeconds / 60) * 30) || (totalVideos * 15); // Fallback: 15 mins por vídeo
+  
+  // Armazenamento real (em GB)
+  const storageUsedGB = parseFloat((history.reduce((sum, h) => sum + (h.size || 0), 0) / (1024 * 1024 * 1024)).toFixed(3));
+
+  // Cota usada no mês corrente
+  const currentMonth = new Date().getMonth();
+  const currentYear = new Date().getFullYear();
+  const quotaUsed = history.filter(h => {
+    const d = new Date(h.createdAt);
+    return d.getMonth() === currentMonth && d.getFullYear() === currentYear;
+  }).length;
+
+  res.json({
+    user: req.user,
+    history,
+    stats: {
+      totalVideos,
+      timeSavedMinutes,
+      storageUsedGB,
+      quotaUsed
+    }
+  });
+});
+
+app.post('/api/auth/upgrade', authenticate, (req, res) => {
+  const { plan } = req.body;
+  if (!plan) return res.status(400).json({ error: 'Plano não fornecido.' });
+
+  const updatedUser = upgradeUserPlan(req.user.id, plan);
+  res.json({ user: updatedUser });
+});
+
+app.post('/api/auth/profile', authenticate, (req, res) => {
+  const { name, email, avatarInitials, avatarColor } = req.body;
+  try {
+    const updatedUser = updateUserProfile(req.user.id, { name, email, avatarInitials, avatarColor });
+    res.json({ user: updatedUser });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+// ==========================================
+// ROTAS DE PROCESSAMENTO (AUTENTICADAS)
+// ==========================================
+
 // Rota de Upload para Foto de Introdução Customizada
-app.post('/api/upload-intro-photo', (req, res) => {
+app.post('/api/upload-intro-photo', authenticate, (req, res) => {
   uploadPhoto.single('introPhoto')(req, res, (err) => {
     if (err instanceof multer.MulterError) {
       return res.status(400).json({ error: `Erro no upload da foto: ${err.message}` });
@@ -119,8 +246,8 @@ app.post('/api/upload-intro-photo', (req, res) => {
   });
 });
 
-// Rota de Upload
-app.post('/api/upload', (req, res) => {
+// Rota de Upload de Vídeo
+app.post('/api/upload', authenticate, (req, res) => {
   upload.array('videos', 10)(req, res, (err) => {
     if (err instanceof multer.MulterError) {
       return res.status(400).json({ error: `Erro no upload: ${err.message}` });
@@ -137,9 +264,10 @@ app.post('/api/upload', (req, res) => {
       const taskId = uuidv4();
       const task = {
         id: taskId,
+        userId: req.user.id, // VINCULAR AO USUÁRIO
         originalName: file.originalname,
         size: file.size,
-        status: 'pending', // pending, processing, completed, error
+        status: 'pending',
         progress: 0,
         inputPath: file.path,
         outputPath: path.join(OUTPUTS_DIR, `processed_${taskId}.mp4`),
@@ -161,24 +289,26 @@ app.post('/api/upload', (req, res) => {
   });
 });
 
-// Obter status de todas as tarefas
-app.get('/api/status', (req, res) => {
-  const tasksSummary = Object.values(tasksStore).map(task => ({
-    id: task.id,
-    originalName: task.originalName,
-    size: task.size,
-    status: task.status,
-    progress: task.progress,
-    errorMsg: task.errorMsg,
-    downloadUrl: task.status === 'completed' ? task.downloadUrl : null
-  }));
+// Obter status de todas as tarefas ativas do usuário
+app.get('/api/status', authenticate, (req, res) => {
+  const tasksSummary = Object.values(tasksStore)
+    .filter(task => task.userId === req.user.id) // FILTRAR POR USUÁRIO
+    .map(task => ({
+      id: task.id,
+      originalName: task.originalName,
+      size: task.size,
+      status: task.status,
+      progress: task.progress,
+      errorMsg: task.errorMsg,
+      downloadUrl: task.status === 'completed' ? task.downloadUrl : null
+    }));
   res.json({ tasks: tasksSummary });
 });
 
-// Obter status de uma tarefa específica
-app.get('/api/status/:id', (req, res) => {
+// Obter status de uma tarefa específica do usuário
+app.get('/api/status/:id', authenticate, (req, res) => {
   const task = tasksStore[req.params.id];
-  if (!task) {
+  if (!task || task.userId !== req.user.id) {
     return res.status(404).json({ error: 'Tarefa não encontrada' });
   }
   res.json({
@@ -193,23 +323,22 @@ app.get('/api/status/:id', (req, res) => {
 });
 
 // Iniciar processamento dos vídeos
-app.post('/api/process', async (req, res) => {
-  const { taskIds, blackScreenDuration, customPhotoPath } = req.body;
+app.post('/api/process', authenticate, async (req, res) => {
+  const { taskIds, blackScreenDuration, customPhotoPath, preset } = req.body;
 
   if (!taskIds || !Array.isArray(taskIds) || taskIds.length === 0) {
     return res.status(400).json({ error: 'Nenhum taskId fornecido' });
   }
 
-  // Filtrar tarefas válidas no estado pendente ou de erro
+  // Filtrar tarefas pertencentes ao usuário autenticado e pendentes
   const validTasks = taskIds
     .map(id => tasksStore[id])
-    .filter(task => task && (task.status === 'pending' || task.status === 'error'));
+    .filter(task => task && task.userId === req.user.id && (task.status === 'pending' || task.status === 'error'));
 
   if (validTasks.length === 0) {
     return res.status(400).json({ error: 'Nenhuma tarefa elegível para processamento' });
   }
 
-  // Responder imediatamente para o cliente que o processamento começou
   res.json({ message: `Processamento de ${validTasks.length} vídeo(s) iniciado em segundo plano.` });
 
   // Executar o processamento em paralelo
@@ -219,7 +348,7 @@ app.post('/api/process', async (req, res) => {
     task.errorMsg = null;
 
     try {
-      await processVideo({
+      const result = await processVideo({
         inputPath: task.inputPath,
         outputPath: task.outputPath,
         blackScreenDuration: parseInt(blackScreenDuration, 10) || 60,
@@ -231,6 +360,16 @@ app.post('/api/process', async (req, res) => {
           task.status = 'completed';
         }
       });
+
+      // Salvar no histórico persistente do banco local
+      addHistory(
+        req.user.id,
+        task.originalName,
+        task.size,
+        preset === 'shorts' ? 'Shorts (9:16)' : 'Reels (9:16)',
+        result.duration || 10
+      );
+
     } catch (err) {
       task.status = 'error';
       task.errorMsg = err.message || 'Erro inesperado durante a edição';
@@ -239,12 +378,13 @@ app.post('/api/process', async (req, res) => {
   });
 });
 
-// Rota para baixar todos os vídeos em formato ZIP
-app.get('/api/download-all', (req, res) => {
-  const completedTasks = Object.values(tasksStore).filter(t => t.status === 'completed');
+// Rota para baixar todos os vídeos concluídos do usuário em formato ZIP
+app.get('/api/download-all', authenticate, (req, res) => {
+  const completedTasks = Object.values(tasksStore)
+    .filter(t => t.userId === req.user.id && t.status === 'completed');
 
   if (completedTasks.length === 0) {
-    return res.status(400).json({ error: 'Nenhum vídeo foi editado com sucesso ainda.' });
+    return res.status(400).json({ error: 'Nenhum vídeo seu foi editado com sucesso ainda.' });
   }
 
   const zip = new AdmZip();
@@ -252,7 +392,6 @@ app.get('/api/download-all', (req, res) => {
 
   completedTasks.forEach((task) => {
     if (fs.existsSync(task.outputPath)) {
-      // Usar o nome original com sufixo editado
       const baseName = path.basename(task.originalName, path.extname(task.originalName));
       const cleanName = `${baseName}_editado.mp4`;
       zip.addLocalFile(task.outputPath, '', cleanName);
@@ -272,21 +411,21 @@ app.get('/api/download-all', (req, res) => {
 });
 
 // Rota para baixar um vídeo individual diretamente como MP4
-app.get('/api/download/:id', (req, res) => {
+app.get('/api/download/:id', authenticate, (req, res) => {
   const task = tasksStore[req.params.id];
-  if (!task || !fs.existsSync(task.outputPath)) {
-    return res.status(404).json({ error: 'Vídeo não encontrado ou ainda não processado.' });
+  if (!task || task.userId !== req.user.id || !fs.existsSync(task.outputPath)) {
+    return res.status(404).json({ error: 'Vídeo não encontrado ou de outro usuário.' });
   }
   const baseName = path.basename(task.originalName, path.extname(task.originalName));
   const cleanName = `${baseName}_editado.mp4`;
   res.download(task.outputPath, cleanName);
 });
 
-// Rota para deletar uma tarefa e limpar seus arquivos físicos do servidor
-app.delete('/api/tasks/:id', (req, res) => {
+// Rota para deletar uma tarefa e limpar seus arquivos físicos
+app.delete('/api/tasks/:id', authenticate, (req, res) => {
   const { id } = req.params;
   const task = tasksStore[id];
-  if (task) {
+  if (task && task.userId === req.user.id) {
     try {
       if (fs.existsSync(task.inputPath)) fs.unlinkSync(task.inputPath);
       if (fs.existsSync(task.outputPath)) fs.unlinkSync(task.outputPath);
@@ -299,7 +438,7 @@ app.delete('/api/tasks/:id', (req, res) => {
   res.json({ success: true });
 });
 
-// Rota de listagem de assets disponíveis (fotos/vídeos do banco de sementes)
+// Rota de listagem de assets
 app.get('/api/assets', (req, res) => {
   try {
     const photosDir = path.join(ASSETS_DIR, 'photos');
