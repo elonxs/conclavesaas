@@ -381,46 +381,48 @@ app.post('/api/process', authenticate, async (req, res) => {
 
   res.json({ message: `Processamento de ${validTasks.length} vídeo(s) iniciado em segundo plano.` });
 
-  // Executar o processamento em paralelo
-  validTasks.forEach(async (task) => {
-    task.status = 'processing';
-    task.progress = 0;
-    task.errorMsg = null;
-    
-    await addLog(req.user.id, 'processing_start', `Iniciou o processamento do vídeo: ${task.originalName} (${preset === 'shorts' ? 'Shorts' : 'Reels'})`);
+  // Processar vídeos SEQUENCIALMENTE (um de cada vez) para não sobrecarregar CPU/RAM
+  (async () => {
+    for (const task of validTasks) {
+      task.status = 'processing';
+      task.progress = 0;
+      task.errorMsg = null;
+      
+      await addLog(req.user.id, 'processing_start', `Iniciou o processamento do vídeo: ${task.originalName} (${preset === 'shorts' ? 'Shorts' : 'Reels'})`);
 
-    try {
-      const result = await processVideo({
-        inputPath: task.inputPath,
-        outputPath: task.outputPath,
-        blackScreenDuration: parseInt(blackScreenDuration, 10) || 60,
-        customPhotoPath: customPhotoPath || null,
-        assetsDir: ASSETS_DIR
-      }, (progress) => {
-        task.progress = progress;
-        if (progress === 100) {
-          task.status = 'completed';
-        }
-      });
+      try {
+        const result = await processVideo({
+          inputPath: task.inputPath,
+          outputPath: task.outputPath,
+          blackScreenDuration: parseInt(blackScreenDuration, 10) || 60,
+          customPhotoPath: customPhotoPath || null,
+          assetsDir: ASSETS_DIR
+        }, (progress) => {
+          task.progress = progress;
+          if (progress === 100) {
+            task.status = 'completed';
+          }
+        });
 
-      // Salvar no histórico persistente do banco local
-      await addHistory(
-        req.user.id,
-        task.originalName,
-        task.size,
-        preset === 'shorts' ? 'Shorts (9:16)' : 'Reels (9:16)',
-        Math.round(result.duration || 10)
-      );
+        // Salvar no histórico persistente do banco
+        await addHistory(
+          req.user.id,
+          task.originalName,
+          task.size,
+          preset === 'shorts' ? 'Shorts (9:16)' : 'Reels (9:16)',
+          Math.round(result.duration || 10)
+        );
 
-      await addLog(req.user.id, 'processing_success', `Processamento concluído com sucesso: ${task.originalName} (${Math.round(result.duration || 10)}s)`);
+        await addLog(req.user.id, 'processing_success', `Processamento concluído com sucesso: ${task.originalName} (${Math.round(result.duration || 10)}s)`);
 
-    } catch (err) {
-      task.status = 'error';
-      task.errorMsg = err.message || 'Erro inesperado durante a edição';
-      console.error(`Erro ao processar tarefa ${task.id}:`, err);
-      await addLog(req.user.id, 'processing_error', `Erro ao processar vídeo ${task.originalName}: ${err.message}`);
+      } catch (err) {
+        task.status = 'error';
+        task.errorMsg = err.message || 'Erro inesperado durante a edição';
+        console.error(`Erro ao processar tarefa ${task.id}:`, err);
+        await addLog(req.user.id, 'processing_error', `Erro ao processar vídeo ${task.originalName}: ${err.message}`);
+      }
     }
-  });
+  })();
 });
 
 // Rota para baixar todos os vídeos concluídos do usuário em formato ZIP
